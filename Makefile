@@ -15,37 +15,37 @@ fmt-check: ## Fail if any file is not formatted
 	$(CARGO) fmt --all --check
 
 .PHONY: check
-check: ## Type-check every target, then the library with default features off
-	$(CARGO) check --all-targets --all-features
-	$(CARGO) check --lib --no-default-features
+check: ## Type-check the workspace, then the core library independently
+	$(CARGO) check --workspace --all-targets --all-features
+	$(CARGO) check -p spacecraft --all-targets --no-default-features
 
 .PHONY: lint
 lint: ## Run clippy on every target; warnings are errors
-	$(CARGO) clippy --all-targets --all-features -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 .PHONY: test
 test: ## Run unit, integration and doc tests
-	$(CARGO) test --all-features
+	$(CARGO) test --workspace --all-features
 
 .PHONY: test-unit
-test-unit: ## Run unit tests only (library and binary)
-	$(CARGO) test --all-features --lib --bins
+test-unit: ## Run unit tests only (libraries and binary)
+	$(CARGO) test --workspace --all-features --lib --bins
 
 .PHONY: test-integration
-test-integration: ## Run integration tests only (tests/)
-	$(CARGO) test --all-features --test '*'
+test-integration: ## Run integration tests only (crates/*/tests/)
+	$(CARGO) test --workspace --all-features --test '*'
 
 .PHONY: doc
 doc: ## Build API docs; broken links and missing docs are errors
-	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --no-deps --all-features
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
 
 .PHONY: build
-build: ## Debug build
-	$(CARGO) build
+build: ## Debug build of all workspace crates
+	$(CARGO) build --workspace
 
 .PHONY: release
-release: ## Optimised build
-	$(CARGO) build --release
+release: ## Optimised build of all workspace crates
+	$(CARGO) build --workspace --release
 
 .PHONY: audit
 audit: ## Check dependencies against the RustSec advisory database

@@ -18,6 +18,12 @@ pub struct Cli {
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Create ~/.config/spacecraft/config.toml
+    Setup {
+        /// Overwrite an existing configuration file
+        #[arg(long)]
+        force: bool,
+    },
     /// Print the version as v{version}
     Version,
 }
@@ -30,6 +36,7 @@ impl Cli {
     /// Returns the subcommand's error unchanged.
     pub fn run(self, out: &mut impl Write) -> anyhow::Result<()> {
         match self.command {
+            Command::Setup { force } => commands::setup::run(force, out),
             Command::Version => commands::version::run(out),
         }
     }
@@ -51,6 +58,20 @@ mod tests {
         let cli = Cli::try_parse_from(["spacecraft", "version"]).unwrap();
 
         assert!(matches!(cli.command, Command::Version));
+    }
+
+    #[test]
+    fn parses_setup_without_force() {
+        let cli = Cli::try_parse_from(["spacecraft", "setup"]).unwrap();
+
+        assert!(matches!(cli.command, Command::Setup { force: false }));
+    }
+
+    #[test]
+    fn parses_setup_with_force() {
+        let cli = Cli::try_parse_from(["spacecraft", "setup", "--force"]).unwrap();
+
+        assert!(matches!(cli.command, Command::Setup { force: true }));
     }
 
     #[test]

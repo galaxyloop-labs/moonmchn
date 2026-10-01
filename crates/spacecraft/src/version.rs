@@ -1,18 +1,10 @@
-//! `spacecraft` library.
-//!
-//! The command-line interface in this package is a thin wrapper over this
-//! crate. Depend on it with `default-features = false` to skip the CLI-only
-//! dependencies.
+//! `spacecraft` version.
 //!
 //! # Examples
 //!
 //! ```
 //! assert!(!spacecraft::VERSION.is_empty());
 //! ```
-
-mod error;
-
-pub use error::{Error, Result};
 
 /// Version of this crate, as declared in `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

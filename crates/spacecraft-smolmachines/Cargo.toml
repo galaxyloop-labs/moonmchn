@@ -1,0 +1,15 @@
+[package]
+name = "spacecraft-smolmachines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "smolmachines backend adapter for Spacecraft"
+license.workspace = true
+readme.workspace = true
+
+[dependencies]
+spacecraft = { version = "0.1.0", path = "../spacecraft" }
+smolmachines = "1.20.2"
+
+[lints]
+workspace = true
