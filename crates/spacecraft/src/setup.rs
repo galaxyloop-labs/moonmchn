@@ -43,7 +43,7 @@ fn setup_in(home: &Path, force: bool) -> Result<PathBuf> {
     // any file, especially when --force replaces a user's configuration.
     let contents = Config::recommended()?.to_toml()?;
 
-    fs::create_dir_all(&directory).map_err(|source| Error::SetupIo {
+    fs::create_dir_all(&directory).map_err(|source| Error::Io {
         path: directory,
         source,
     })?;
@@ -57,7 +57,7 @@ fn ensure_missing(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err(Error::ConfigAlreadyExists(path.to_path_buf())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::SetupIo {
+        Err(source) => Err(Error::Io {
             path: path.to_path_buf(),
             source,
         }),
@@ -78,7 +78,7 @@ fn write_configuration(path: &Path, contents: &str, force: bool) -> Result<()> {
             if !force && source.kind() == io::ErrorKind::AlreadyExists {
                 Error::ConfigAlreadyExists(path.to_path_buf())
             } else {
-                Error::SetupIo {
+                Error::Io {
                     path: path.to_path_buf(),
                     source,
                 }
@@ -86,7 +86,7 @@ fn write_configuration(path: &Path, contents: &str, force: bool) -> Result<()> {
         })?;
 
     file.write_all(contents.as_bytes())
-        .map_err(|source| Error::SetupIo {
+        .map_err(|source| Error::Io {
             path: path.to_path_buf(),
             source,
         })
@@ -175,7 +175,7 @@ mod tests {
 
         let error = setup_in(home.path(), true).unwrap_err();
 
-        assert!(matches!(error, Error::SetupIo { path: failed_path, .. } if failed_path == path));
+        assert!(matches!(error, Error::Io { path: failed_path, .. } if failed_path == path));
         assert_eq!(fs::read_to_string(sentinel).unwrap(), CUSTOM_CONFIG);
     }
 
@@ -186,6 +186,6 @@ mod tests {
 
         let error = setup_in(home.path(), false).unwrap_err();
 
-        assert!(matches!(error, Error::SetupIo { .. }));
+        assert!(matches!(error, Error::Io { .. }));
     }
 }

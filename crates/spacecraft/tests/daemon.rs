@@ -1,0 +1,132 @@
+//! End-to-end tests for the Spacecraft daemon library.
+
+use spacecraft::daemon::client::Client;
+use spacecraft::daemon::{Mode, serve_in};
+use spacecraft::{Error, VERSION};
+use std::fs::File;
+use std::io::BufReader;
+use std::io::prelude::*;
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
+
+mod common;
+
+#[test]
+fn answers_status() {
+    let dir = tempfile::tempdir().unwrap();
+    common::start_daemon(dir.path().to_path_buf());
+    let client = Client::new(dir.path().to_path_buf());
+
+    let status = common::wait_for_status(&client).unwrap();
+
+    assert_eq!(status.version, VERSION);
+    assert_eq!(status.pid, std::process::id());
+}
+
+#[test]
+fn errors_on_malformed_message() {
+    let dir = tempfile::tempdir().unwrap();
+    common::start_daemon(dir.path().to_path_buf());
+    let socket_path = dir.path().join("daemon.sock");
+    let client = Client::new(dir.path().to_path_buf());
+
+    let _status = common::wait_for_status(&client).unwrap();
+
+    let mut stream = UnixStream::connect(socket_path).unwrap();
+    stream.write_all(b"nope\n").unwrap();
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+
+    assert!(response.starts_with(r#"{"error":{"message":"invalid request: "#));
+    assert!(response.ends_with('\n'));
+}
+
+#[test]
+fn rejects_an_oversized_request() {
+    let dir = tempfile::tempdir().unwrap();
+    common::start_daemon(dir.path().to_path_buf());
+    let socket_path = dir.path().join("daemon.sock");
+    let client = Client::new(dir.path().to_path_buf());
+
+    let _status = common::wait_for_status(&client).unwrap();
+
+    // No newline, and the stream stays open: only the size cap ends the request.
+    let mut stream = UnixStream::connect(socket_path).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(&b"x".repeat(5000)).unwrap();
+
+    // Read only the reply line: the daemon closes with unread bytes, which Linux
+    // reports as a connection reset after the reply.
+    let mut response = String::new();
+    BufReader::new(&stream).read_line(&mut response).unwrap();
+
+    assert!(response.starts_with(r#"{"error":{"message":"invalid request: "#));
+    assert!(client.status().is_ok());
+}
+
+#[test]
+fn drops_an_idle_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    common::start_daemon(dir.path().to_path_buf());
+    let socket_path = dir.path().join("daemon.sock");
+    let client = Client::new(dir.path().to_path_buf());
+
+    let _status = common::wait_for_status(&client).unwrap();
+
+    // The read timeout outlasts the daemon's 5 second deadline, so EOF means the
+    // daemon closed the connection.
+    let mut stream = UnixStream::connect(socket_path).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(7)))
+        .unwrap();
+
+    let mut response = String::new();
+    assert_eq!(stream.read_to_string(&mut response).unwrap(), 0);
+    assert!(client.status().is_ok());
+}
+
+#[test]
+fn shutdowns_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = common::start_daemon(dir.path().to_path_buf());
+    let socket_path = dir.path().join("daemon.sock");
+    let client = Client::new(dir.path().to_path_buf());
+
+    let _status = common::wait_for_status(&client).unwrap();
+
+    client.shutdown().unwrap();
+
+    // The daemon released its lock before `shutdown` returned.
+    let pid_file = File::open(dir.path().join("daemon.pid")).unwrap();
+    assert!(pid_file.try_lock().is_ok());
+    drop(pid_file);
+
+    let (handle_result, output) = t.join().unwrap();
+
+    assert!(handle_result.is_ok());
+    assert_eq!(
+        output,
+        format!("listening on {}\nstopped\n", socket_path.display()).as_bytes()
+    );
+
+    // The daemon should be gone now.
+    assert!(matches!(client.status(), Err(Error::DaemonNotRunning)));
+}
+
+#[test]
+fn refuses_a_second_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    common::start_daemon(dir.path().to_path_buf());
+    let client = Client::new(dir.path().to_path_buf());
+
+    let _status = common::wait_for_status(&client).unwrap();
+
+    let mut out = Vec::new();
+    let err = serve_in(dir.path(), Mode::Foreground, &mut out).unwrap_err();
+
+    assert!(matches!(err, Error::DaemonAlreadyRunning));
+    assert!(out.is_empty());
+}

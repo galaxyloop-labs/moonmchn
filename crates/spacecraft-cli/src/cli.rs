@@ -15,6 +15,22 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// `spacecraft daemon` subcommands.
+#[derive(Debug, Clone, Copy, Subcommand)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub enum DaemonCommand {
+    /// Start the daemon in the background
+    Start {
+        /// Run the daemon in this process; used by start
+        #[arg(long, hide = true)]
+        detached: bool,
+    },
+    /// Stop the daemon
+    Stop,
+    /// Check the daemon status
+    Status,
+}
+
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -26,6 +42,12 @@ pub enum Command {
     },
     /// Print the version as v{version}
     Version,
+    /// Manage the daemon
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Daemon {
+        #[command(subcommand)]
+        subcommand: DaemonCommand,
+    },
 }
 
 impl Cli {
@@ -38,6 +60,8 @@ impl Cli {
         match self.command {
             Command::Setup { force } => commands::setup::run(force, out),
             Command::Version => commands::version::run(out),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Command::Daemon { subcommand } => commands::daemon::run(subcommand, out),
         }
     }
 }
@@ -46,7 +70,7 @@ impl Cli {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Command};
+    use super::{Cli, Command, DaemonCommand};
 
     #[test]
     fn definition_is_valid() {
@@ -87,5 +111,53 @@ mod tests {
         cli.run(&mut out).unwrap();
 
         assert_eq!(out, format!("v{}\n", spacecraft::VERSION).as_bytes());
+    }
+
+    #[test]
+    fn parses_daemon_start_without_detached() {
+        let cli = Cli::try_parse_from(["spacecraft", "daemon", "start"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Daemon {
+                subcommand: DaemonCommand::Start { detached: false }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_daemon_start_with_detached() {
+        let cli = Cli::try_parse_from(["spacecraft", "daemon", "start", "--detached"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Daemon {
+                subcommand: DaemonCommand::Start { detached: true }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_daemon_stop() {
+        let cli = Cli::try_parse_from(["spacecraft", "daemon", "stop"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Daemon {
+                subcommand: DaemonCommand::Stop
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_daemon_status() {
+        let cli = Cli::try_parse_from(["spacecraft", "daemon", "status"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Daemon {
+                subcommand: DaemonCommand::Status
+            }
+        ));
     }
 }

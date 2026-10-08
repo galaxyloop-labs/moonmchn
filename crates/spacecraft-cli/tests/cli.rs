@@ -183,7 +183,7 @@ fn setup_reports_parent_directory_failure() {
         .failure()
         .code(1)
         .stdout("")
-        .stderr(predicate::str::contains("failed to set up"));
+        .stderr(predicate::str::contains("failed to access"));
 
     assert_eq!(
         fs::read_to_string(config_directory).unwrap(),
@@ -205,7 +205,7 @@ fn setup_does_not_replace_a_directory_even_with_force() {
         .failure()
         .code(1)
         .stdout("")
-        .stderr(predicate::str::contains("failed to set up"));
+        .stderr(predicate::str::contains("failed to access"));
 
     assert_eq!(fs::read_to_string(path.join("keep")).unwrap(), "keep");
 }
