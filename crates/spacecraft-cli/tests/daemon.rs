@@ -1,13 +1,13 @@
-//! End-to-end tests for the `spacecraft daemon` commands.
+//! End-to-end tests for the `spacecraft daemon` and `spacecraft machine` commands.
+//!
+//! None of them boots a machine, so none needs an engine.
 
 use assert_cmd::Command;
 use assert_cmd::cargo::CommandCargoExt;
 
-use std::fs::DirBuilder;
 use std::fs::File;
 use std::fs::Permissions;
 use std::fs::TryLockError;
-use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -41,8 +41,9 @@ impl Runtime {
         let mut command =
             std::process::Command::cargo_bin("spacecraft").expect("binary is built by cargo test");
         command
-            .env("TMPDIR", self.dir.path())
-            .env("XDG_RUNTIME_DIR", self.dir.path());
+            .env("SPACECRAFT_HOME", self.dir.path())
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("XDG_CONFIG_HOME");
 
         command
     }
@@ -83,9 +84,13 @@ fn started_pid(stdout: &str) -> u32 {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        let _ = self.spacecraft().args(["daemon", "stop"]).output();
+        // `--force`, so a test that leaves a machine behind still stops its daemon.
+        let _ = self
+            .spacecraft()
+            .args(["daemon", "stop", "--force"])
+            .output();
 
-        let pid_path = self.dir.path().join("spacecraft").join("daemon.pid");
+        let pid_path = self.dir.path().join("daemon.pid");
 
         if let Ok(pid_file) = File::open(&pid_path)
             && let Err(TryLockError::WouldBlock) = pid_file.try_lock()
@@ -148,8 +153,7 @@ fn restarts_immediately_after_stop() {
 fn repairs_stale_state() {
     let runtime = Runtime::new();
     // Leftovers of a daemon that crashed: a dead socket file and a stale pid.
-    let state = runtime.dir.path().join("spacecraft");
-    DirBuilder::new().mode(0o700).create(&state).unwrap();
+    let state = runtime.dir.path();
     std::fs::write(state.join("daemon.sock"), "").unwrap();
     std::fs::write(state.join("daemon.pid"), "999999\n").unwrap();
 
@@ -188,4 +192,107 @@ fn concurrent_starts_leave_one_daemon() {
     let [already_running, started] = stdouts;
     assert_eq!(already_running, "Daemon already running\n");
     runtime.assert_running(started_pid(&started));
+}
+
+#[test]
+fn daemon_stop_force_with_nothing_running() {
+    let runtime = Runtime::new();
+    runtime.start();
+
+    runtime
+        .spacecraft()
+        .args(["daemon", "stop", "--force"])
+        .assert()
+        .success()
+        .stdout("Daemon stopped\n");
+}
+
+#[test]
+fn machine_list_is_empty() {
+    let runtime = Runtime::new();
+    runtime.start();
+
+    runtime
+        .spacecraft()
+        .args(["machine", "list"])
+        .assert()
+        .success()
+        .stdout("")
+        .stderr("");
+}
+
+#[test]
+fn machine_status_of_an_unknown_machine_fails() {
+    let runtime = Runtime::new();
+    runtime.start();
+
+    for command in ["machine status x", "machine status -e x"] {
+        runtime
+            .spacecraft()
+            .args(command.split_whitespace())
+            .assert()
+            .failure()
+            .code(1)
+            .stderr("error: machine x not found\n");
+    }
+}
+
+#[test]
+fn machine_stop_of_an_unknown_machine_is_not_running() {
+    let runtime = Runtime::new();
+    runtime.start();
+
+    runtime
+        .spacecraft()
+        .args(["machine", "stop", "x"])
+        .assert()
+        .success()
+        .stdout("Machine x not running\n");
+}
+
+#[test]
+fn machine_start_without_configuration_fails() {
+    let runtime = Runtime::new();
+    runtime.start();
+
+    runtime
+        .spacecraft()
+        .args(["machine", "start", "x"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "config.toml does not exist; run `spacecraft setup` to create it",
+        ));
+}
+
+#[test]
+fn machine_start_rejects_an_uppercase_name() {
+    let runtime = Runtime::new();
+    // A configuration, so the request gets past loading it and reaches the daemon.
+    runtime.spacecraft().arg("setup").assert().success();
+    runtime.start();
+
+    runtime
+        .spacecraft()
+        .args(["machine", "start", "Alpha"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(
+            "error: invalid machine name \"Alpha\": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit\n",
+        );
+}
+
+#[test]
+fn machine_commands_need_the_daemon() {
+    let runtime = Runtime::new();
+
+    runtime
+        .spacecraft()
+        .args(["machine", "list"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr("error: the daemon is not running\n");
 }

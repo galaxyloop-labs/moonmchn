@@ -29,21 +29,32 @@ pub(super) fn lock(dir: &Path) -> Result<File> {
         .mode(FILE_MODE)
         .create(true)
         .open(&path)
-        .map_err(|err| super::io_error(&path, err))?;
+        .map_err(|err| Error::io(&path, err))?;
 
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(TryLockError::WouldBlock) => Err(Error::DaemonAlreadyRunning), // Lock not acquired
-        Err(TryLockError::Error(err)) => Err(super::io_error(&path, err)),
+        Err(TryLockError::Error(err)) => Err(Error::io(&path, err)),
     }
 }
 
+/// Claims `dir` for this daemon: takes the lock on `daemon.pid`, writes this process's pid into
+/// the file, and removes a socket a dead daemon left behind.
+///
+/// The returned `File` holds the lock for as long as it, or any clone of it, lives. `Machines`
+/// keeps it, behind an `Arc` that every worker able to change a marker clones, so the lock lasts
+/// until the registry and the last of those workers are gone.
+///
+/// # Errors
+///
+/// Returns [`Error::DaemonAlreadyRunning`] if another daemon holds the lock, and [`Error::Io`]
+/// if `daemon.pid` cannot be opened, locked or written.
 pub(super) fn claim(dir: &Path) -> Result<File> {
     let mut file = lock(dir)?;
     let path = dir.join(LOCK_FILE_NAME);
 
-    file.set_len(0).map_err(|err| super::io_error(&path, err))?;
-    writeln!(&mut file, "{}", std::process::id()).map_err(|err| super::io_error(&path, err))?;
+    file.set_len(0).map_err(|err| Error::io(&path, err))?;
+    writeln!(&mut file, "{}", std::process::id()).map_err(|err| Error::io(&path, err))?;
 
     // Remove the socket a dead daemon left behind. One that survives this makes the
     // daemon's `bind` fail with the socket path.
@@ -60,7 +71,7 @@ pub(super) fn open_log(dir: &Path) -> Result<File> {
         .create(true)
         .mode(FILE_MODE)
         .open(&path)
-        .map_err(|e| super::io_error(&path, e))
+        .map_err(|e| Error::io(&path, e))
 }
 
 pub(super) fn socket_path(dir: &Path) -> PathBuf {

@@ -104,17 +104,7 @@ fn inspect(
     let nvidia_memory = nvidia_memory(nvidia_output.unwrap_or_default());
     let dedicated_memory = nodes
         .iter()
-        .filter_map(|node| {
-            // sysfs gives exact bytes but NVIDIA's driver does not expose it,
-            // so fall back to resolving the node's PCI address into the
-            // nvidia-smi report. Only accessible nodes are ever looked up.
-            let device = sysfs.join(node.file_name()?).join("device");
-            sysfs_memory(&device).or_else(|| {
-                let pci_device = device.canonicalize().ok()?;
-                let address = pci_address(pci_device.file_name()?.to_str()?)?;
-                nvidia_memory.get(&address).copied()
-            })
-        })
+        .filter_map(|node| node_memory(sysfs, node, &nvidia_memory))
         // Smallest capacity, never the sum: the budget must fit whichever
         // device the engine ends up using.
         .min();
@@ -124,6 +114,25 @@ fn inspect(
         dedicated_memory,
         ..Accelerators::default()
     }
+}
+
+/// Reads one render node's dedicated VRAM: from sysfs first, then from the
+/// `nvidia-smi` report through the node's PCI address.
+///
+/// sysfs gives exact bytes but NVIDIA's driver does not expose it, so the
+/// fallback resolves the node's `device` link to its PCI address and looks
+/// that up in the report. Only accessible nodes are ever looked up.
+fn node_memory(
+    sysfs: &Path,
+    node: &Path,
+    nvidia_memory: &BTreeMap<PciAddress, Mib>,
+) -> Option<Mib> {
+    let device = sysfs.join(node.file_name()?).join("device");
+    sysfs_memory(&device).or_else(|| {
+        let pci_device = device.canonicalize().ok()?;
+        let address = pci_address(pci_device.file_name()?.to_str()?)?;
+        nvidia_memory.get(&address).copied()
+    })
 }
 
 /// Lists the `renderD<number>` nodes in `directory` that pass `accessible`.
@@ -206,32 +215,32 @@ fn nvidia_device_compute_available(line: &str) -> bool {
 /// Rows with an unparsable address, a non-numeric or zero capacity, or extra
 /// columns are skipped. A repeated address keeps its smaller capacity.
 fn nvidia_memory(output: &[u8]) -> BTreeMap<PciAddress, Mib> {
+    let Ok(output) = std::str::from_utf8(output) else {
+        return BTreeMap::new();
+    };
     let mut devices = BTreeMap::new();
-    if let Ok(output) = std::str::from_utf8(output) {
-        for line in output.lines() {
-            let Some((address, memory)) = line.split_once(',') else {
-                continue;
-            };
-            // NVIDIA reports whole MiB already. Parse within Mib's range so
-            // oversized measurements cannot be truncated into a smaller budget.
-            // Extra columns make the capacity unparsable and skip the row.
-            let (Some(address), Ok(memory)) =
-                (pci_address(address.trim()), memory.trim().parse::<u32>())
-            else {
-                continue;
-            };
-            if memory > 0 {
-                // nvidia-smi lists each address once; if it ever does not,
-                // keep the conservative figure rather than the last one seen.
-                let memory = Mib::new(memory);
-                devices
-                    .entry(address)
-                    .and_modify(|existing: &mut Mib| *existing = (*existing).min(memory))
-                    .or_insert(memory);
-            }
-        }
+    for (address, memory) in output.lines().filter_map(nvidia_memory_row) {
+        // nvidia-smi lists each address once; if it ever does not, keep the
+        // conservative figure rather than the last one seen.
+        devices
+            .entry(address)
+            .and_modify(|existing: &mut Mib| *existing = (*existing).min(memory))
+            .or_insert(memory);
     }
     devices
+}
+
+/// Parses one `pci.bus_id, memory.total` row into its address and capacity.
+///
+/// NVIDIA reports whole MiB already. The capacity is parsed within Mib's
+/// range so oversized measurements cannot be truncated into a smaller budget;
+/// extra columns make it unparsable. An unparsable address, a non-numeric or
+/// zero capacity, and extra columns all yield `None`.
+fn nvidia_memory_row(line: &str) -> Option<(PciAddress, Mib)> {
+    let (address, memory) = line.split_once(',')?;
+    let address = pci_address(address.trim())?;
+    let memory = memory.trim().parse::<u32>().ok()?;
+    (memory > 0).then_some((address, Mib::new(memory)))
 }
 
 /// Parses a hexadecimal `domain:bus:device.function` address, as printed by

@@ -1,17 +1,18 @@
 //! Daemon launcher
 
-use std::io::ErrorKind;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, ErrorKind};
 use std::os::unix::net::UnixStream;
 use std::os::unix::prelude::OwnedFd;
 use std::path::Path;
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
 use crate::daemon::instance;
 use crate::{Error, Result};
+
+/// What `read_line` returns once the child closed its end of the pair: it exited.
+const EOF: usize = 0;
 
 /// Launch outcomes
 #[derive(Debug)]
@@ -41,7 +42,7 @@ pub(super) fn launch(mut command: Command, dir: &Path, timeout: Duration) -> Res
     // sockets support a read timeout, which std's pipes lack.
     let (parent_stream, child_stream) = UnixStream::pair().map_err(Error::DaemonLaunch)?;
 
-    let mut child = command
+    let child = command
         .stdout(OwnedFd::from(child_stream))
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
@@ -61,49 +62,64 @@ pub(super) fn launch(mut command: Command, dir: &Path, timeout: Duration) -> Res
 
     match result {
         // The child hung up without a ready line: it exited. Find out why.
-        Ok(0) => {
-            let output = child.wait_with_output().map_err(Error::DaemonLaunch)?;
+        Ok(EOF) => explain_early_exit(child, dir, timeout),
+        // A ready line: the child is now the daemon.
+        Ok(_) => Ok(leave_running(child)),
+        // No ready line in time, or the read failed.
+        Err(e) => Err(kill_unready(child, e)),
+    }
+}
 
-            // Most likely the child lost a race to another daemon: the lock says
-            // whether one is alive, the socket whether it accepts connections.
-            match instance::lock(dir) {
-                // Nobody holds the lock: the child really failed. `_` drops the file
-                // at once, releasing the lock again.
-                Ok(_) => Err(Error::DaemonStartFailed {
-                    status: output.status,
-                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                }),
-                Err(Error::DaemonAlreadyRunning) => {
-                    if wait_for_socket(&instance::socket_path(dir), timeout) {
-                        return Ok(Start::AlreadyRunning);
-                    }
+/// Reports why the child exited before writing its ready line.
+///
+/// Most likely the child lost a race to another daemon: the lock says whether one is alive,
+/// the socket whether it accepts connections. Nobody holding the lock means the child really
+/// failed, and its exit status and stderr say how.
+fn explain_early_exit(child: Child, dir: &Path, timeout: Duration) -> Result<Start> {
+    let output = child.wait_with_output().map_err(Error::DaemonLaunch)?;
 
-                    Err(Error::DaemonUnresponsive)
-                }
-                Err(e) => Err(e),
+    match instance::lock(dir) {
+        // `_` drops the file at once, releasing the lock again.
+        Ok(_) => Err(Error::DaemonStartFailed {
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
+        Err(Error::DaemonAlreadyRunning) => {
+            if wait_for_socket(&instance::socket_path(dir), timeout) {
+                Ok(Start::AlreadyRunning)
+            } else {
+                Err(Error::DaemonUnresponsive)
             }
         }
-        // A ready line: the child is now the daemon. Leave it running.
-        Ok(_) => {
-            let pid = child.id();
-            // The launcher owns the daemon as a child process until it exits. Waiting on it
-            // from a thread reaps it then, so a long-lived caller never accumulates zombies.
-            // The thread blocks in `waitpid` and costs nothing while the daemon runs; a caller
-            // that exits first takes the thread with it and init reaps the daemon instead.
-            thread::spawn(move || {
-                let _ = child.wait();
-            });
-            Ok(Start::Started { pid })
-        }
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
+        Err(e) => Err(e),
+    }
+}
 
-            Err(match e.kind() {
-                ErrorKind::WouldBlock | ErrorKind::TimedOut => Error::DaemonStartTimeout,
-                _ => Error::DaemonLaunch(e),
-            })
-        }
+/// Leaves the child running as the daemon and reports its pid.
+///
+/// The launcher owns the daemon as a child process until it exits. Waiting on it from a
+/// thread reaps it then, so a long-lived caller never accumulates zombies. The thread blocks
+/// in `waitpid` and costs nothing while the daemon runs; a caller that exits first takes the
+/// thread with it and init reaps the daemon instead.
+fn leave_running(mut child: Child) -> Start {
+    let pid = child.id();
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Start::Started { pid }
+}
+
+/// Kills a child whose ready line never arrived, and names the reason.
+///
+/// A read timeout means the daemon did not start in time; any other read error is a launch
+/// failure.
+fn kill_unready(mut child: Child, error: io::Error) -> Error {
+    let _ = child.kill();
+    let _ = child.wait();
+
+    match error.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => Error::DaemonStartTimeout,
+        _ => Error::DaemonLaunch(error),
     }
 }
 

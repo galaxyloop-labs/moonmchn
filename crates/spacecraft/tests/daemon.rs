@@ -1,15 +1,17 @@
 //! End-to-end tests for the Spacecraft daemon library.
 
-use spacecraft::daemon::client::Client;
-use spacecraft::daemon::{Mode, serve_in};
-use spacecraft::{Error, VERSION};
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+use spacecraft::daemon::client::Client;
+use spacecraft::daemon::{Mode, serve_in};
+use spacecraft::{Error, VERSION};
+
 mod common;
+use crate::common::FakeEngine;
 
 #[test]
 fn answers_status() {
@@ -51,15 +53,13 @@ fn rejects_an_oversized_request() {
 
     let _status = common::wait_for_status(&client).unwrap();
 
-    // No newline, and the stream stays open: only the size cap ends the request.
+    // No newline, and the stream stays open: only the 64 KiB size cap ends the request.
     let mut stream = UnixStream::connect(socket_path).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    stream.write_all(&b"x".repeat(5000)).unwrap();
+    stream.write_all(&b"x".repeat(64 * 1024)).unwrap();
 
-    // Read only the reply line: the daemon closes with unread bytes, which Linux
-    // reports as a connection reset after the reply.
     let mut response = String::new();
     BufReader::new(&stream).read_line(&mut response).unwrap();
 
@@ -97,7 +97,7 @@ fn shutdowns_on_request() {
 
     let _status = common::wait_for_status(&client).unwrap();
 
-    client.shutdown().unwrap();
+    client.shutdown(false).unwrap();
 
     // The daemon released its lock before `shutdown` returned.
     let pid_file = File::open(dir.path().join("daemon.pid")).unwrap();
@@ -125,7 +125,14 @@ fn refuses_a_second_daemon() {
     let _status = common::wait_for_status(&client).unwrap();
 
     let mut out = Vec::new();
-    let err = serve_in(dir.path(), Mode::Foreground, &mut out).unwrap_err();
+    // This daemon fails before it serves, so its teardown bound never comes into play.
+    let err = serve_in::<FakeEngine>(
+        dir.path(),
+        Mode::Foreground,
+        &mut out,
+        Duration::from_secs(60),
+    )
+    .unwrap_err();
 
     assert!(matches!(err, Error::DaemonAlreadyRunning));
     assert!(out.is_empty());

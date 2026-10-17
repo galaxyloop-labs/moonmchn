@@ -1,12 +1,84 @@
 use std::io;
 use std::num::TryFromIntError;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitStatus;
+
+use crate::machine::State;
 
 /// Errors produced by this crate.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Daemon stop requested, but there are still running machines.
+    #[error("{count} running machine(s); pass `--force` to stop them")]
+    MachinesRunning {
+        /// The number of running machines.
+        count: usize,
+    },
+    /// Another operation is starting or stopping the machine.
+    #[error("machine {name} is {state}")]
+    MachineBusy {
+        /// The machine's name.
+        name: String,
+        /// The machine's state.
+        state: State,
+    },
+    /// The engine cannot report the machine.
+    #[error(
+        "the engine cannot report machine {name}; retry, or run `spacecraft machine stop {name}` to discard it"
+    )]
+    MachineUnknown {
+        /// The machine's name.
+        name: String,
+    },
+    /// The machine is running with a different configuration than requested.
+    #[error(
+        "machine {name} is running with a different configuration; run `spacecraft machine stop {name}` to discard it, then start it again"
+    )]
+    MachineConfigMismatch {
+        /// The machine's name.
+        name: String,
+    },
+    /// The machine name is invalid.
+    #[error(
+        "invalid machine name {name:?}: use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit"
+    )]
+    InvalidMachineName {
+        /// The invalid name.
+        name: String,
+    },
+    /// A host mount source is a relative path.
+    #[error("invalid mount source {path:?}: a host directory must be an absolute path")]
+    InvalidMountSource {
+        /// The rejected source. The field is named `path` because thiserror treats a field
+        /// named `source` as the underlying error, which must implement `std::error::Error`.
+        path: String,
+    },
+    /// The engine failed to boot a machine, and deleting it failed too.
+    #[error(
+        "the engine failed to boot {name}: {boot}; deleting it failed too: {cleanup}; run `spacecraft machine stop {name}`"
+    )]
+    MachineLeftover {
+        /// The machine's name.
+        name: String,
+        /// Why the boot failed.
+        boot: String,
+        /// Why deleting the machine failed.
+        cleanup: String,
+    },
+    /// The requested machine could not be found.
+    #[error("machine {name} not found")]
+    MachineNotFound {
+        /// The machine's name.
+        name: String,
+    },
+    /// The engine reported a failure.
+    #[error("the engine failed: {message}")]
+    Engine {
+        /// The engine's error message.
+        message: String,
+    },
     /// The daemon could not detach, build its runtime, install its `SIGTERM` handler, or
     /// write its ready line.
     #[error("failed to set up the daemon")]
@@ -38,7 +110,7 @@ pub enum Error {
     #[error("failed to connect to the daemon transport")]
     DaemonTransport(#[source] io::Error),
     /// The daemon answered a request with an error.
-    #[error("the daemon request failed: {message}")]
+    #[error("{message}")]
     DaemonRequest {
         /// The daemon's error message.
         message: String,
@@ -49,26 +121,35 @@ pub enum Error {
     /// Another daemon holds the lock on `daemon.pid`.
     #[error("daemon is already running")]
     DaemonAlreadyRunning,
-    /// The platform's runtime directory environment variable is unset or empty.
-    #[error("{variable} is unset or empty; cannot determine the daemon runtime directory")]
-    MissingDaemonRuntime {
-        /// The required environment variable.
-        variable: &'static str,
-    },
-    /// A directory is not safe for per-user daemon state.
-    #[error("unsafe daemon runtime directory {}: {reason}", path.display())]
-    UnsafeDaemonRuntime {
+    /// The daemon is shutting down, so it admits no new machine operation.
+    #[error("the daemon is stopping")]
+    DaemonStopping,
+    /// A directory is not safe for per-user configuration or state.
+    #[error("unsafe directory {}: {reason}", path.display())]
+    UnsafeDirectory {
         /// The rejected directory.
         path: PathBuf,
         /// The failed safety requirement.
         reason: &'static str,
     },
     /// The home directory cannot be determined from the environment.
-    #[error("HOME is unset or empty; cannot determine the configuration path")]
+    #[error("HOME is unset or empty")]
     MissingHome,
     /// Setup refused to overwrite an existing configuration.
-    #[error("{} already exists; use --force to overwrite it", .0.display())]
+    #[error("{} already exists; use `--force` to overwrite it", .0.display())]
     ConfigAlreadyExists(PathBuf),
+    /// The configuration file could not be found at the given path.
+    #[error("{} does not exist; run `spacecraft setup` to create it", .0.display())]
+    ConfigNotFound(PathBuf),
+    /// The configuration file could not be deserialized.
+    #[error("failed to parse {path} as TOML")]
+    ConfigDeserialization {
+        /// The affected path.
+        path: PathBuf,
+        /// The underlying TOML parsing error.
+        #[source]
+        source: toml::de::Error,
+    },
     /// The host's available CPU count could not be determined.
     #[error("failed to determine available host CPUs")]
     HostCpu(#[source] io::Error),
@@ -93,6 +174,16 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+}
+
+impl Error {
+    /// Preserves the filesystem error and identifies the affected path.
+    pub(crate) fn io(path: &Path, source: io::Error) -> Self {
+        Self::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
 }
 
 /// [`std::result::Result`] with this crate's [`Error`] as the default error type.

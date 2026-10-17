@@ -15,7 +15,9 @@ pub mod config;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod daemon;
+pub(crate) mod dirs;
 mod error;
+pub mod machine;
 mod setup;
 mod version;
 

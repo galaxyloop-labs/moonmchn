@@ -1,12 +1,19 @@
 //! End-to-end tests for the `spacecraft` binary.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn spacecraft() -> Command {
-    Command::cargo_bin("spacecraft").expect("binary is built by cargo test")
+    let mut command = Command::cargo_bin("spacecraft").expect("binary is built by cargo test");
+    command
+        .env_remove("SPACECRAFT_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("HOME");
+    command
 }
 
 /// The shared workspace version, read from disk so the expectation does not
@@ -70,10 +77,10 @@ fn assert_initial_config(path: &std::path::Path) {
 }
 
 #[test]
-fn setup_creates_host_aware_toml_at_requested_path() {
+fn setup_honors_xdg_config_home() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let path = home.path().join(".config/spacecraft/config.toml");
+    let path = xdg.path().join("spacecraft/config.toml");
 
     spacecraft()
         .env("HOME", home.path())
@@ -85,7 +92,7 @@ fn setup_creates_host_aware_toml_at_requested_path() {
         .stderr("");
 
     assert_initial_config(&path);
-    assert_eq!(fs::read_dir(xdg.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -256,4 +263,30 @@ fn setup_help_documents_force_without_creating_configuration() {
         .stdout(predicate::str::contains("--force"));
 
     assert!(!home.path().join(".config").exists());
+}
+
+#[test]
+fn setup_honors_spacecraft_home() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let outer = tempfile::tempdir().unwrap();
+    // Missing on purpose: a tempdir is already 0700, which would hide a broken mode.
+    let spacecraft_home = outer.path().join("spacecraft");
+    let path = spacecraft_home.join("config.toml");
+
+    spacecraft()
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("SPACECRAFT_HOME", &spacecraft_home)
+        .arg("setup")
+        .assert()
+        .success()
+        .stdout(format!("Created {}\n", path.display()))
+        .stderr("");
+
+    assert_initial_config(&path);
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(xdg.path()).unwrap().count(), 0);
+    let mode = fs::metadata(&spacecraft_home).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o700);
 }

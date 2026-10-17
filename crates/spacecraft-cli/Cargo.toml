@@ -15,6 +15,7 @@ doc = false
 
 [dependencies]
 spacecraft = { version = "0.1.0", path = "../spacecraft" }
+spacecraft-smolmachines = { version = "0.1.0", path = "../spacecraft-smolmachines" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 

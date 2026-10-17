@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```
-//! use spacecraft::{Config, config::Resources};
+//! use spacecraft::{config::Resources, machine::Config};
 //!
 //! let config = Config {
 //!     resources: Resources {
@@ -23,11 +23,11 @@
 //! ```
 
 use spacecraft::{
-    Config,
     config::{EgressInterceptor, Mount, Port, Resources},
+    machine::Config,
 };
 
-/// Converts reusable defaults into an SDK config with a caller-supplied name.
+/// Converts a machine's configuration into an SDK config with a caller-supplied name.
 ///
 /// Settings outside mounts and resources keep their SDK defaults. Conversion is
 /// infallible and does not perform validation or machine creation.
@@ -90,8 +90,8 @@ pub fn egress_interceptor(interceptor: EgressInterceptor) -> smolmachines::Egres
 #[cfg(test)]
 mod tests {
     use spacecraft::{
-        Config,
         config::{EgressInterceptor, Mount, Port, Resources},
+        machine::Config,
     };
 
     use super::{egress_interceptor, machine_config, mount, port, resources};

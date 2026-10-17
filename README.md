@@ -8,27 +8,41 @@ The library is the product; the `spacecraft` binary is a thin wrapper over it.
 ## Workspace
 
 - `crates/spacecraft`: application-owned configuration types, TOML serialization,
-  host recommendations, setup, and the daemon. It does not depend on a machine SDK
-  or CLI parser.
+  host recommendations, setup, the daemon, and the `Engine` and `Machine` traits
+  that machine backends implement. It does not depend on a machine SDK or CLI
+  parser.
 - `crates/spacecraft-smolmachines`: converts Spacecraft configuration into
-  `smolmachines` SDK types. Depends on `spacecraft`, never the reverse.
-- `crates/spacecraft-cli`: the `spacecraft` executable.
+  `smolmachines` SDK types and implements `Engine` and `Machine` with the SDK.
+  Depends on `spacecraft`, never the reverse.
+- `crates/spacecraft-cli`: the `spacecraft` executable, which runs the daemon with
+  the smolmachines engine.
 
 ## CLI
 
 ```sh
 cargo install --path crates/spacecraft-cli
 spacecraft --help
-spacecraft version         # prints v{version} from the workspace, e.g. v0.1.0
-spacecraft setup           # creates ~/.config/spacecraft/config.toml
-spacecraft daemon start    # starts the daemon in the background
-spacecraft daemon status   # prints the daemon's pid and version
-spacecraft daemon stop     # stops the daemon
+spacecraft version                     # prints v{version} from the workspace, e.g. v0.1.0
+spacecraft setup                       # creates ~/.config/spacecraft/config.toml
+spacecraft daemon start                # starts the daemon in the background
+spacecraft daemon status               # prints the daemon's pid and version
+spacecraft daemon stop [--force]       # stops the daemon; --force also stops every machine
+spacecraft machine start <name>        # boots a machine from config.toml
+spacecraft machine stop <name>         # stops a machine and discards its disks
+spacecraft machine status [-e] <name>  # prints its state; -e adds its configuration
+spacecraft machine list                # prints one line per machine
 ```
 
 `spacecraft setup` writes host-aware machine defaults, and leaves an existing file
 untouched unless you pass `--force`. The daemon runs on Linux and macOS; `start` and
-`stop` succeed when the daemon is already in the requested state.
+`stop` succeed when the daemon is already in the requested state. `daemon stop`
+refuses while machines run, unless you pass `--force`. Machine commands talk to the
+daemon, so start it first.
+
+Configuration lives in `$XDG_CONFIG_HOME/spacecraft` and the daemon's state in
+`$XDG_STATE_HOME/spacecraft`, falling back to `~/.config/spacecraft` and
+`~/.local/state/spacecraft` when those variables are unset. `SPACECRAFT_HOME`
+overrides both and keeps everything in one directory.
 
 ## Library
 
@@ -51,6 +65,9 @@ let config = spacecraft::Config::recommended()?;
 let contents = config.to_toml()?;
 let config: spacecraft::Config = toml::from_str(&contents)?;
 ```
+
+Machine backends are pluggable; [SPEC.md](SPEC.md#machine-backends) describes how
+to add one.
 
 ### smolmachines adapter
 

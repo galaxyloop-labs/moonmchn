@@ -1,9 +1,9 @@
 //! Run the Spacecraft daemon.
 
-use crate::{Error, Result};
-use std::io;
+use crate::machine::Engine;
+use crate::{Result, dirs};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
@@ -12,7 +12,8 @@ pub mod client;
 pub use client::Client;
 mod instance;
 mod launcher;
-mod runtime;
+mod machines;
+mod state;
 pub use launcher::Start;
 
 mod server;
@@ -42,11 +43,11 @@ const READY_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// # Errors
 ///
-/// Returns an error if [`prepare_runtime_directory`] fails, if `command` cannot be
+/// Returns an error if [`prepare_state_directory`] fails, if `command` cannot be
 /// spawned or its ready line cannot be read, or if the daemon fails to start or does
-/// not become ready in time. The variants of [`Error`] describe each case.
+/// not become ready in time. The variants of [`Error`](crate::Error) describe each case.
 pub fn start(command: Command) -> Result<Start> {
-    let dir = prepare_runtime_directory()?;
+    let dir = prepare_state_directory()?;
     launcher::launch(command, &dir, READY_TIMEOUT)
 }
 
@@ -55,38 +56,30 @@ pub fn start(command: Command) -> Result<Start> {
 ///
 /// # Errors
 ///
-/// Returns an error if [`prepare_runtime_directory`] or [`serve_in`] fails.
-pub fn serve(out: &mut impl Write) -> Result<()> {
-    let dir = prepare_runtime_directory()?;
-    serve_in(&dir, Mode::Detached, out)
+/// Returns an error if [`prepare_state_directory`] or [`serve_in`] fails.
+pub fn serve<E: Engine>(out: &mut impl Write) -> Result<()> {
+    let dir = prepare_state_directory()?;
+    serve_in::<E>(&dir, Mode::Detached, out, server::TEARDOWN_TIMEOUT)
 }
 
-/// Ensures the daemon has a private runtime directory and returns its path.
+/// Ensures the daemon has a private state directory and returns its resolved path.
 ///
-/// Uses `$XDG_RUNTIME_DIR/spacecraft` on Linux and `$TMPDIR/spacecraft` on macOS.
-/// The existing runtime root and the Spacecraft directory must belong to the
-/// effective user and have mode `0700`. Existing permissions are never changed.
-/// Symlinks at either directory are rejected; system ancestor symlinks such as
-/// macOS's `/var` are resolved before checking the ancestor directories.
+/// The directory is `$SPACECRAFT_HOME`, else `$XDG_STATE_HOME/spacecraft`, else
+/// `$HOME/.local/state/spacecraft`; an empty variable counts as unset. Missing
+/// directories on that path are created with mode `0700`. Every directory above it must
+/// belong to root or the effective user and must not be writable by other users, unless
+/// it is a root-owned sticky directory such as `/tmp`; symlinks among them, such as
+/// macOS's `/var`, are resolved. The state directory itself must be a real directory, not
+/// a symlink, owned by the effective user with mode `0700`. Existing permissions are
+/// never changed.
 ///
 /// This does not start the daemon or create its socket.
 ///
 /// # Errors
 ///
-/// Returns an error if the environment variable is unset or empty, if a directory breaks
-/// the rules above, or if a directory cannot be created or inspected. The variants of
-/// [`Error`] describe each case.
-pub fn prepare_runtime_directory() -> Result<PathBuf> {
-    runtime::prepare_in(
-        std::env::var_os(runtime::RUNTIME_ENV).as_deref(),
-        rustix::process::geteuid().as_raw(),
-    )
-}
-
-/// Preserves the filesystem error and identifies the affected path.
-fn io_error(path: &Path, source: io::Error) -> Error {
-    Error::Io {
-        path: path.to_path_buf(),
-        source,
-    }
+/// Returns an error if none of those variables is set, if the chosen path is relative or
+/// contains `..`, if a directory breaks the rules above, or if a directory cannot be
+/// created or inspected. The variants of [`Error`](crate::Error) describe each case.
+pub fn prepare_state_directory() -> Result<PathBuf> {
+    state::prepare_in(&dirs::state_dir()?, rustix::process::geteuid().as_raw())
 }

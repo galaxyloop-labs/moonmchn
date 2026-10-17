@@ -4,16 +4,22 @@ use std::io;
 use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::prelude::*;
-use std::path::PathBuf;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::daemon::api::{Reply, Request, Status};
+use crate::daemon::api::{MachineStart, MachineStatus, MachineStop, Reply, Request, Status};
 use crate::daemon::instance;
+use crate::machine;
 use crate::{Error, Result};
 
-/// How long to wait for a reply, and for a stopping daemon to release its lock.
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for the reply to a request that does not boot or destroy a machine, and
+/// for a stopping daemon to release its lock.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long to wait for a machine operation: a request that boots or destroys a machine.
+const OPERATION_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// How long to wait between attempts to acquire the lock after a shutdown request.
 const SHUTDOWN_RETRY_TIMEOUT: Duration = Duration::from_millis(10);
@@ -21,16 +27,18 @@ const SHUTDOWN_RETRY_TIMEOUT: Duration = Duration::from_millis(10);
 /// A client for communicating with the daemon.
 pub struct Client {
     dir: PathBuf,
-    timeout: Duration,
+    reply_timeout: Duration,
+    operation_timeout: Duration,
 }
 
 impl Client {
-    /// Create a new client for the daemon whose state lives in the runtime directory `dir`.
+    /// Create a new client for the daemon whose files live in the state directory `dir`.
     #[must_use]
     pub fn new(dir: PathBuf) -> Self {
         Self {
             dir,
-            timeout: TIMEOUT,
+            reply_timeout: REPLY_TIMEOUT,
+            operation_timeout: OPERATION_TIMEOUT,
         }
     }
 
@@ -41,69 +49,177 @@ impl Client {
     /// Returns [`Error::DaemonNotRunning`] if no daemon answers, and other errors if the
     /// request or its reply fails. The variants of [`Error`] describe each case.
     pub fn status(&self) -> Result<Status> {
-        self.request(&Request::Status {})
+        self.request(&Request::Status {}, self.reply_timeout)
     }
 
     /// Shutdown the daemon.
+    ///
+    /// Without `force`, the daemon refuses while machines run. With `force`, it stops every
+    /// machine before it exits, and the request and the wait for its lock get the longer
+    /// machine operation timeout.
     ///
     /// Returns once the daemon has released its lock on `daemon.pid`, so a `start` right
     /// after it succeeds.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DaemonNotRunning`] if no daemon answers,
+    /// Returns [`Error::DaemonRequest`] if the daemon refuses, for example while machines run
+    /// and `force` is unset. Returns [`Error::DaemonNotRunning`] if no daemon answers,
     /// [`Error::DaemonAlreadyRunning`] if the daemon is already running, and
     /// [`Error::DaemonStopTimeout`] if the daemon acknowledges but still holds its lock
     /// when the timeout expires. Other errors mean the request, its reply, or the lock
     /// check failed. The variants of [`Error`] describe each case.
-    pub fn shutdown(&self) -> Result<()> {
-        self.request::<()>(&Request::Shutdown {})?;
+    pub fn shutdown(&self, force: bool) -> Result<()> {
+        // The wait for the lock below lasts as long as the daemon's shutdown. A forced shutdown
+        // stops every machine first, which can take as long as a machine operation; an
+        // unforced one exits at once or is refused. The request's reply is immediate either way.
+        let timeout = if force {
+            self.operation_timeout
+        } else {
+            self.reply_timeout
+        };
+        self.request::<()>(&Request::Shutdown { force }, timeout)?;
 
         // The daemon replies before it exits and holds its lock until the very end. Wait
         // on the lock because it decides whether a daemon is running.
-        let deadline = Instant::now() + self.timeout;
-        loop {
-            match instance::lock(&self.dir) {
-                // `_` drops the file at once, releasing the lock again. A `start` racing
-                // this exact instant could see it held; a sequential `stop && start` never does.
-                Ok(_) => return Ok(()),
-                Err(Error::DaemonAlreadyRunning) if Instant::now() < deadline => {
-                    thread::sleep(SHUTDOWN_RETRY_TIMEOUT);
-                }
-                Err(Error::DaemonAlreadyRunning) => return Err(Error::DaemonStopTimeout),
-                Err(e) => return Err(e),
-            }
-        }
+        wait_for_lock_release(&self.dir, timeout)
+    }
+
+    /// Check the status of a machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DaemonRequest`] if the daemon rejects the request.
+    /// Returns [`Error::DaemonNotRunning`] if no daemon answers, and other errors if the
+    /// request or its reply fails. The variants of [`Error`] describe each case.
+    pub fn machine_status(&self, name: &str) -> Result<MachineStatus> {
+        self.request(
+            &Request::MachineStatus {
+                name: name.to_string(),
+            },
+            self.reply_timeout,
+        )
+    }
+
+    /// Start a machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DaemonRequest`] if the daemon rejects the request.
+    /// Returns [`Error::DaemonNotRunning`] if no daemon answers, and other errors if the
+    /// request or its reply fails. The variants of [`Error`] describe each case.
+    pub fn machine_start(&self, name: &str, config: machine::Config) -> Result<MachineStart> {
+        self.request(
+            &Request::MachineStart {
+                name: name.to_string(),
+                config,
+            },
+            self.operation_timeout,
+        )
+    }
+
+    /// Stop a machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DaemonRequest`] if the daemon rejects the request.
+    /// Returns [`Error::DaemonNotRunning`] if no daemon answers, and other errors if the
+    /// request or its reply fails. The variants of [`Error`] describe each case.
+    pub fn machine_stop(&self, name: &str) -> Result<MachineStop> {
+        self.request(
+            &Request::MachineStop {
+                name: name.to_string(),
+            },
+            self.operation_timeout,
+        )
+    }
+
+    /// List the machines that the daemon knows about.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DaemonRequest`] if the daemon rejects the request.
+    /// Returns [`Error::DaemonNotRunning`] if no daemon answers, and other errors if the
+    /// request or its reply fails. The variants of [`Error`] describe each case.
+    pub fn machine_list(&self) -> Result<Vec<machine::Status>> {
+        self.request(&Request::MachineList {}, self.reply_timeout)
     }
 
     /// Send a request to the daemon and return the response.
-    fn request<T: DeserializeOwned>(&self, request: &Request) -> Result<T> {
+    ///
+    /// Both the write of the request and the read of the reply are bounded by `timeout`.
+    fn request<T: DeserializeOwned>(&self, request: &Request, timeout: Duration) -> Result<T> {
         let request_json = serde_json::to_string(request).map_err(Error::DaemonProtocol)?;
-
-        let mut stream =
-            instance::connect(&instance::socket_path(&self.dir)).map_err(socket_error)?;
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(socket_error)?;
-
+        let mut stream = connect_with_timeouts(&self.dir, timeout)?;
         stream
             .write_all(format!("{request_json}\n").as_bytes())
             .map_err(socket_error)?;
 
         let mut response = String::new();
-        let count = BufReader::read_line(&mut BufReader::new(&stream), &mut response)
+        BufReader::new(&stream)
+            .read_line(&mut response)
             .map_err(socket_error)?;
+        parse_reply(&response)
+    }
+}
 
-        if count == 0 {
-            return Err(Error::DaemonNotRunning);
+/// Waits up to `timeout` for the daemon to release its lock on `daemon.pid`.
+///
+/// Each attempt takes the lock and drops it at once, releasing it again. A `start` racing that
+/// exact instant could see it held; a sequential `stop && start` never does.
+fn wait_for_lock_release(dir: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match instance::lock(dir) {
+            Ok(_) => return Ok(()),
+            Err(Error::DaemonAlreadyRunning) if Instant::now() < deadline => {
+                thread::sleep(SHUTDOWN_RETRY_TIMEOUT);
+            }
+            Err(Error::DaemonAlreadyRunning) => return Err(Error::DaemonStopTimeout),
+            Err(e) => return Err(e),
         }
+    }
+}
 
-        let reply = serde_json::from_str::<Reply<T>>(&response).map_err(Error::DaemonProtocol)?;
+/// Connects to the daemon's socket, with `timeout` on every wait to write or read.
+///
+/// A request larger than the socket's send buffer, 8 KiB on macOS and about 200 KiB on Linux,
+/// completes only as the daemon reads it, and a `machine_start` request may reach 64 KiB.
+/// Without a write timeout, a daemon that reads nothing would hold `write_all` forever: one in
+/// its teardown, whose listener still queues connections that nobody accepts, or one stopped by
+/// a signal. The read timeout never comes into play, because the read never starts.
+///
+/// Unix applies the write timeout to each wait for room in the buffer. Against a daemon that
+/// reads nothing, `write_all`'s first call fills the buffer and returns the part it sent once
+/// the timeout expires; its next call sends nothing and fails with `WouldBlock`, which
+/// `socket_error` turns into `DaemonTransport`, the same error a reply timeout gives.
+///
+/// A request may therefore wait up to twice `timeout` for the write and `timeout` again for
+/// the reply. That is accepted: one shared deadline would need the read timeout reset after the
+/// write, and a stalled daemon is still detected within seconds for `status` and `list`.
+fn connect_with_timeouts(dir: &Path, timeout: Duration) -> Result<UnixStream> {
+    let stream = instance::connect(&instance::socket_path(dir)).map_err(socket_error)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(socket_error)?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(socket_error)?;
+    Ok(stream)
+}
 
-        match reply {
-            Reply::Done(value) => Ok(value),
-            Reply::Error { message } => Err(Error::DaemonRequest { message }),
-        }
+/// Decodes one reply line.
+///
+/// An empty line means the daemon hung up without answering, which counts as no daemon. A
+/// `done` reply yields its value, and an `error` reply the daemon's message.
+fn parse_reply<T: DeserializeOwned>(line: &str) -> Result<T> {
+    if line.is_empty() {
+        return Err(Error::DaemonNotRunning);
+    }
+
+    match serde_json::from_str::<Reply<T>>(line).map_err(Error::DaemonProtocol)? {
+        Reply::Done(value) => Ok(value),
+        Reply::Error { message } => Err(Error::DaemonRequest { message }),
     }
 }
 
@@ -130,11 +246,14 @@ mod tests {
         let _lock = instance::lock(socket_dir.path()).unwrap();
 
         let client = Client {
-            dir: socket_dir.path().to_path_buf(),
-            timeout: Duration::from_millis(100),
+            reply_timeout: Duration::from_millis(100),
+            ..Client::new(socket_dir.path().to_path_buf())
         };
 
-        assert!(matches!(client.shutdown(), Err(Error::DaemonStopTimeout)));
+        assert!(matches!(
+            client.shutdown(false),
+            Err(Error::DaemonStopTimeout)
+        ));
     }
 
     #[test]
@@ -177,13 +296,48 @@ mod tests {
         let _listener = UnixListener::bind(instance::socket_path(socket_dir.path())).unwrap();
 
         let client = Client {
-            dir: socket_dir.path().to_path_buf(),
-            timeout: Duration::from_millis(100),
+            reply_timeout: Duration::from_millis(100),
+            ..Client::new(socket_dir.path().to_path_buf())
         };
         assert!(matches!(
             client.status(),
             Err(Error::DaemonTransport { .. })
         ));
+    }
+
+    #[test]
+    fn timeout_request_to_a_daemon_that_stops_reading() {
+        let socket_dir = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(instance::socket_path(socket_dir.path())).unwrap();
+
+        // The daemon accepts the connection and never reads from it. `recv` blocks until the
+        // test drops `tx` at its end, and `_stream` keeps the connection open until then;
+        // `let _` would drop the stream at once, and the client would see a closed connection.
+        // Nothing is ever sent, so `::<()>` gives the channel the item type inference cannot.
+        let (tx, rx) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let _stream = listener.incoming().next().unwrap().unwrap();
+            let _ = rx.recv();
+        });
+
+        // A `machine_start` request is bounded by the operation timeout.
+        let client = Client {
+            operation_timeout: Duration::from_millis(100),
+            ..Client::new(socket_dir.path().to_path_buf())
+        };
+
+        // The socket's send buffer holds 8 KiB on macOS and about 200 KiB on Linux. A name of
+        // 300 000 bytes makes the request larger than both, so its write can complete only as
+        // the daemon reads it.
+        let name = "A".repeat(300_000);
+        let started = Instant::now();
+        let result = client.machine_start(&name, machine::Config::default());
+
+        assert!(matches!(result, Err(Error::DaemonTransport { .. })));
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        // Unblock the daemon thread, which drops the stream and closes the connection.
+        drop(tx);
     }
 
     #[test]
@@ -206,8 +360,8 @@ mod tests {
         let dir = socket_dir.path().to_path_buf();
         thread::spawn(move || {
             let client = Client {
-                dir,
-                timeout: Duration::from_millis(100),
+                reply_timeout: Duration::from_millis(100),
+                ..Client::new(dir)
             };
             tx.send(client.status()).unwrap();
         });

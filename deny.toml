@@ -8,7 +8,9 @@ all-features = true
 ignore = []
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+# ISC, BSD-3-Clause and CDLA-Permissive-2.0 come with the TLS stack of the
+# smolmachines SDK: ring, rustls-webpki, untrusted, subtle and webpki-roots.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "ISC", "BSD-3-Clause", "CDLA-Permissive-2.0"]
 confidence-threshold = 0.8
 
 [bans]

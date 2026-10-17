@@ -1,7 +1,11 @@
 //! Spacecraft's configuration.
 
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
+use std::path::Path;
 
+use crate::dirs;
 use crate::{Error, Result};
 
 mod accelerators;
@@ -69,6 +73,40 @@ impl Config {
         Self::for_host(cpus, memory, acc)
     }
 
+    /// Loads the configuration from the default location.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ConfigNotFound`] if the file does not exist.
+    /// - [`Error::ConfigDeserialization`] if the file is not valid TOML.
+    /// - [`Error::Io`] if the file cannot be read for any other reason.
+    pub fn load() -> Result<Self> {
+        let path = dirs::config_dir()?.join(dirs::CONFIG_FILE_NAME);
+        Self::load_from(&path)
+    }
+
+    /// Loads a configuration from a file.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ConfigNotFound`] if the file does not exist.
+    /// - [`Error::ConfigDeserialization`] if the file is not valid TOML.
+    /// - [`Error::Io`] if the file cannot be read for any other reason.
+    pub(crate) fn load_from(path: &Path) -> Result<Self> {
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::ConfigNotFound(path.to_path_buf()));
+            }
+            Err(source) => return Err(Error::io(path, source)),
+        };
+
+        toml::from_str(&contents).map_err(|source| Error::ConfigDeserialization {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     fn for_host(cpus: HostCPUs, memory: HostMemory, accelerators: Accelerators) -> Result<Self> {
         Ok(Self {
             resources: Resources {
@@ -99,6 +137,7 @@ mod tests {
         Accelerators, Config, EgressInterceptor, HostCPUs, HostMemory, Mib, Mount, Port, Resources,
     };
     use crate::ByteSize;
+    use crate::Error;
     use std::num::NonZero;
 
     fn host_cpus(count: usize) -> HostCPUs {
@@ -329,5 +368,39 @@ cuda = false
         let debug = format!("{interceptor:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains(&interceptor.token));
+    }
+
+    #[test]
+    fn load_from_reads_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, FULLY_CONFIGURED).unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config, fully_configured());
+    }
+
+    #[test]
+    fn load_from_reports_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.toml");
+
+        let error = Config::load_from(&path).unwrap_err();
+
+        assert!(matches!(error, Error::ConfigNotFound(missing) if missing == path));
+    }
+
+    #[test]
+    fn load_from_reports_invalid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.toml");
+        std::fs::write(&path, "cpus = [").unwrap();
+
+        let error = Config::load_from(&path).unwrap_err();
+
+        assert!(error.to_string().contains(&path.display().to_string()));
+        assert!(matches!(
+            error,
+            Error::ConfigDeserialization { path: failed, .. } if failed == path
+        ));
     }
 }

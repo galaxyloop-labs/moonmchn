@@ -26,15 +26,49 @@ pub enum DaemonCommand {
         detached: bool,
     },
     /// Stop the daemon
-    Stop,
+    Stop {
+        /// Also stop every running machine
+        #[arg(long)]
+        force: bool,
+    },
     /// Check the daemon status
     Status,
+}
+
+/// `spacecraft machine` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub enum MachineCommand {
+    /// Create and boot a machine from the configuration
+    Start {
+        /// The machine's name
+        name: String,
+    },
+    /// Stop a machine and discard its disks
+    Stop {
+        /// The machine's name
+        name: String,
+    },
+    /// Show a machine's state; --extended adds its configuration
+    Status {
+        /// The machine's name
+        name: String,
+        /// Also show the machine's name and configuration
+        #[arg(short, long)]
+        extended: bool,
+    },
+    /// List the daemon's machines
+    List,
 }
 
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Create ~/.config/spacecraft/config.toml
+    /// Create the configuration file, ~/.config/spacecraft/config.toml by default
+    ///
+    /// The file goes to `$SPACECRAFT_HOME/config.toml` when `SPACECRAFT_HOME` is set, else
+    /// to `$XDG_CONFIG_HOME/spacecraft/config.toml`, else to
+    /// `~/.config/spacecraft/config.toml`.
     Setup {
         /// Overwrite an existing configuration file
         #[arg(long)]
@@ -47,6 +81,12 @@ pub enum Command {
     Daemon {
         #[command(subcommand)]
         subcommand: DaemonCommand,
+    },
+    /// Manage machines through the daemon
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Machine {
+        #[command(subcommand)]
+        subcommand: MachineCommand,
     },
 }
 
@@ -62,6 +102,8 @@ impl Cli {
             Command::Version => commands::version::run(out),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             Command::Daemon { subcommand } => commands::daemon::run(subcommand, out),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Command::Machine { subcommand } => commands::machine::run(subcommand, out),
         }
     }
 }
@@ -144,7 +186,19 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Daemon {
-                subcommand: DaemonCommand::Stop
+                subcommand: DaemonCommand::Stop { force: false }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_daemon_stop_with_force() {
+        let cli = Cli::try_parse_from(["spacecraft", "daemon", "stop", "--force"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Daemon {
+                subcommand: DaemonCommand::Stop { force: true }
             }
         ));
     }
