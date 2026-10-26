@@ -17,6 +17,7 @@ pub mod config;
 pub mod daemon;
 pub(crate) mod dirs;
 mod error;
+pub mod image;
 pub mod machine;
 mod setup;
 mod version;

@@ -55,6 +55,23 @@ pub enum Error {
         /// named `source` as the underlying error, which must implement `std::error::Error`.
         path: String,
     },
+    /// A machine's image, or its digest, is invalid.
+    #[error("invalid image {image:?}: {reason}")]
+    InvalidImage {
+        /// The rejected image, or the rejected digest.
+        image: String,
+        /// Why the image is invalid.
+        reason: &'static str,
+    },
+    /// An image could not be resolved to its digest. The message names the step that failed,
+    /// such as reading the archive or a request to the registry.
+    #[error("failed to resolve image {image}: {message}")]
+    ImageResolve {
+        /// The image as given.
+        image: String,
+        /// The step that failed, and why.
+        message: String,
+    },
     /// The engine failed to boot a machine, and deleting it failed too.
     #[error(
         "the engine failed to boot {name}: {boot}; deleting it failed too: {cleanup}; run `spacecraft machine stop {name}`"
@@ -182,6 +199,14 @@ impl Error {
         Self::Io {
             path: path.to_path_buf(),
             source,
+        }
+    }
+
+    /// Names the rejected image, or digest, and the rule it breaks.
+    pub(crate) fn invalid_image(image: &str, reason: &'static str) -> Self {
+        Self::InvalidImage {
+            image: image.to_string(),
+            reason,
         }
     }
 }

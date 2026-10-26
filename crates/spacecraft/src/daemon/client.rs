@@ -145,6 +145,22 @@ impl Client {
         self.request(&Request::MachineList {}, self.reply_timeout)
     }
 
+    /// Resolve a machine: check that the daemon owns it and that no start or stop holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DaemonRequest`] if the daemon rejects the request.
+    /// Returns [`Error::DaemonNotRunning`] if no daemon answers, and other errors if the
+    /// request or its reply fails. The variants of [`Error`] describe each case.
+    pub fn machine_resolve(&self, name: &str) -> Result<()> {
+        self.request(
+            &Request::MachineResolve {
+                name: name.to_string(),
+            },
+            self.reply_timeout,
+        )
+    }
+
     /// Send a request to the daemon and return the response.
     ///
     /// Both the write of the request and the read of the reply are bounded by `timeout`.
@@ -236,6 +252,8 @@ fn socket_error(error: io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Resources;
+    use crate::image::Image;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::mpsc;
 
@@ -330,8 +348,13 @@ mod tests {
         // 300 000 bytes makes the request larger than both, so its write can complete only as
         // the daemon reads it.
         let name = "A".repeat(300_000);
+        let config = machine::Config {
+            image: Image::parse("ghcr.io/org/name:latest").unwrap(),
+            mounts: Vec::new(),
+            resources: Resources::default(),
+        };
         let started = Instant::now();
-        let result = client.machine_start(&name, machine::Config::default());
+        let result = client.machine_start(&name, config);
 
         assert!(matches!(result, Err(Error::DaemonTransport { .. })));
         assert!(started.elapsed() < Duration::from_secs(5));

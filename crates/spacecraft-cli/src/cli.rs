@@ -43,6 +43,9 @@ pub enum MachineCommand {
     Start {
         /// The machine's name
         name: String,
+        /// Boot this image, a registry reference or a docker save archive, in place of the default
+        #[arg(long)]
+        image: Option<String>,
     },
     /// Stop a machine and discard its disks
     Stop {
@@ -59,6 +62,25 @@ pub enum MachineCommand {
     },
     /// List the daemon's machines
     List,
+    /// Run a command in a machine; stdin, stdout, stderr and the exit status pass through
+    ///
+    /// The command gets a terminal when stdin, stdout and stderr are all terminals, so programs
+    /// such as vi and top work; a pipe or a redirect gets the bytes unchanged.
+    Exec {
+        /// The machine's name
+        name: String,
+        /// Give the command no terminal, even when stdin, stdout and stderr are terminals
+        #[arg(long)]
+        no_tty: bool,
+        /// The command to run in the machine, after `--`
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Open a terminal in a machine
+    Shell {
+        /// The machine's name
+        name: String,
+    },
 }
 
 /// Top-level subcommands.
@@ -112,7 +134,7 @@ impl Cli {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Command, DaemonCommand};
+    use super::{Cli, Command, DaemonCommand, MachineCommand};
 
     #[test]
     fn definition_is_valid() {
@@ -212,6 +234,100 @@ mod tests {
             Command::Daemon {
                 subcommand: DaemonCommand::Status
             }
+        ));
+    }
+
+    #[test]
+    fn parses_machine_start_without_image() {
+        let cli = Cli::try_parse_from(["spacecraft", "machine", "start", "x"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Machine {
+                subcommand: MachineCommand::Start { name, image: None }
+            } if name == "x"
+        ));
+    }
+
+    #[test]
+    fn parses_machine_start_with_image() {
+        let cli = Cli::try_parse_from([
+            "spacecraft",
+            "machine",
+            "start",
+            "x",
+            "--image",
+            "./guest.tar",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Machine {
+                subcommand: MachineCommand::Start { name, image: Some(image) }
+            } if name == "x" && image == "./guest.tar"
+        ));
+    }
+
+    #[test]
+    fn parses_machine_exec_with_a_command() {
+        let cli = Cli::try_parse_from([
+            "spacecraft",
+            "machine",
+            "exec",
+            "x",
+            "--",
+            "sh",
+            "-c",
+            "a b",
+        ])
+        .unwrap();
+
+        // `a b` stays one element: clap passes everything after `--` through as given.
+        assert!(matches!(
+            cli.command,
+            Command::Machine {
+                subcommand: MachineCommand::Exec { name, no_tty: false, command }
+            } if name == "x" && command == ["sh", "-c", "a b"]
+        ));
+    }
+
+    #[test]
+    fn parses_machine_exec_with_no_tty() {
+        let cli = Cli::try_parse_from([
+            "spacecraft",
+            "machine",
+            "exec",
+            "--no-tty",
+            "x",
+            "--",
+            "true",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Machine {
+                subcommand: MachineCommand::Exec { name, no_tty: true, command }
+            } if name == "x" && command == ["true"]
+        ));
+    }
+
+    #[test]
+    fn machine_exec_requires_a_command_after_double_dash() {
+        assert!(Cli::try_parse_from(["spacecraft", "machine", "exec", "x"]).is_err());
+        assert!(Cli::try_parse_from(["spacecraft", "machine", "exec", "x", "true"]).is_err());
+    }
+
+    #[test]
+    fn parses_machine_shell() {
+        let cli = Cli::try_parse_from(["spacecraft", "machine", "shell", "x"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Command::Machine {
+                subcommand: MachineCommand::Shell { name }
+            } if name == "x"
         ));
     }
 }

@@ -2,7 +2,9 @@
 
 use rustix::process;
 use spacecraft::Error;
+use spacecraft::config::Resources;
 use spacecraft::daemon::client::Client;
+use spacecraft::image::Image;
 use spacecraft::machine::Config;
 
 mod common;
@@ -14,7 +16,12 @@ fn shuts_down_on_sigterm() {
     let client = Client::new(dir.path().to_path_buf());
 
     let _status = common::wait_for_status(&client).unwrap();
-    client.machine_start("alpha", Config::default()).unwrap();
+    let config = Config {
+        image: Image::parse("ghcr.io/org/name:latest").unwrap(),
+        mounts: Vec::new(),
+        resources: Resources::default(),
+    };
+    client.machine_start("alpha", config).unwrap();
 
     process::kill_process(process::getpid(), process::Signal::TERM).unwrap();
 
@@ -28,6 +35,8 @@ fn shuts_down_on_sigterm() {
         "{output}"
     );
     assert!(!common::marker(dir.path(), "alpha").exists());
+    // The machine was told why it stopped.
+    common::assert_announced("alpha", "the spacecraft daemon is stopping");
 
     assert!(matches!(client.status(), Err(Error::DaemonNotRunning)));
 }

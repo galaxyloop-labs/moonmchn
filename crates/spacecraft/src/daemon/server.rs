@@ -269,6 +269,7 @@ async fn handle<E: Engine>(
             send(&mut writer, machines.stop::<E>(name).await).await
         }
         Ok(Request::MachineList {}) => send(&mut writer, machines.list::<E>().await).await,
+        Ok(Request::MachineResolve { name }) => send(&mut writer, machines.resolve(name)).await,
         Err(e) => invalid_request(&mut writer, &e).await,
     }
 }

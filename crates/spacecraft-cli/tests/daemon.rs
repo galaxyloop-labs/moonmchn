@@ -285,6 +285,23 @@ fn machine_start_rejects_an_uppercase_name() {
 }
 
 #[test]
+fn machine_start_rejects_a_missing_archive() {
+    let runtime = Runtime::new();
+    // A configuration, so the command gets past loading it. No daemon: the CLI checks the
+    // image before it sends anything.
+    runtime.spacecraft().arg("setup").assert().success();
+
+    // Cargo runs the tests from the crate's directory, which holds no `missing.tar`.
+    runtime
+        .spacecraft()
+        .args(["machine", "start", "x", "--image", "./missing.tar"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicates::str::contains("failed to access ./missing.tar"));
+}
+
+#[test]
 fn machine_commands_need_the_daemon() {
     let runtime = Runtime::new();
 
@@ -295,4 +312,80 @@ fn machine_commands_need_the_daemon() {
         .failure()
         .code(1)
         .stderr("error: the daemon is not running\n");
+}
+
+#[test]
+fn machine_exec_and_shell_need_the_daemon() {
+    let runtime = Runtime::new();
+
+    for command in ["machine exec x -- true", "machine shell x"] {
+        runtime
+            .spacecraft()
+            .args(command.split_whitespace())
+            .assert()
+            .failure()
+            .code(1)
+            .stderr("error: the daemon is not running\n");
+    }
+}
+
+#[test]
+fn machine_exec_and_shell_of_an_unknown_machine_fail() {
+    let runtime = Runtime::new();
+    runtime.start();
+
+    // No engine is involved: the daemon resolves a name from its records alone.
+    for command in ["machine exec x -- true", "machine shell x"] {
+        runtime
+            .spacecraft()
+            .args(command.split_whitespace())
+            .assert()
+            .failure()
+            .code(1)
+            .stderr("error: machine x not found\n");
+    }
+}
+
+#[test]
+fn machine_exec_passes_the_exit_status_through() {
+    let runtime = Runtime::new();
+    runtime.start();
+    // A marker written by hand, so `x` resolves: the daemon only checks that the file exists.
+    let marker = runtime.dir.path().join("machines").join("x");
+    std::fs::write(&marker, "").unwrap();
+    // A stand-in for the engine's client, reached through the SDK's `SMOLVM` override: it skips
+    // the client's options and runs the command after `--` on the host.
+    let engine = runtime.dir.path().join("smolvm");
+    std::fs::write(
+        &engine,
+        r#"#!/bin/sh
+while [ "$1" != -- ]; do shift || exit; done
+shift
+exec "$@"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&engine, Permissions::from_mode(0o755)).unwrap();
+    // `shell` stays out: through the stand-in, its `sh -l` would be a login shell on the host,
+    // which reads the host's profile.
+
+    runtime
+        .spacecraft()
+        .args(["machine", "exec", "x", "--", "true"])
+        .env("SMOLVM", &engine)
+        .assert()
+        .success();
+
+    // 3, a status only the command can produce: the CLI exits 1 on its own errors, and 2 on
+    // usage errors.
+    runtime
+        .spacecraft()
+        .args(["machine", "exec", "x", "--", "sh", "-c", "exit 3"])
+        .env("SMOLVM", &engine)
+        .assert()
+        .code(3);
+
+    // With its marker gone, `x` is no machine for the `Runtime` guard's `daemon stop --force`
+    // to ask the engine about.
+    std::fs::remove_file(&marker).unwrap();
 }

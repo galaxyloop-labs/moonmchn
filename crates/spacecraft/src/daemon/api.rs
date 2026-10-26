@@ -34,6 +34,11 @@ pub enum Request {
     },
     /// Request the list of machines.
     MachineList {},
+    /// Request the resolution of a machine.
+    MachineResolve {
+        /// The name of the machine to resolve.
+        name: String,
+    },
 }
 
 /// Reply variant from the daemon.
@@ -83,12 +88,14 @@ pub enum MachineStop {
 pub struct MachineStatus {
     /// The status of the machine.
     pub status: machine::Status,
-    /// The configuration of the machine, if available.
-    pub config: Option<machine::Config>,
+    /// The record of the machine, if available.
+    pub record: Option<machine::Record>,
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::config::Resources;
+    use crate::image::{Digest, Image};
     use crate::machine::State::Running;
 
     use super::*;
@@ -152,7 +159,11 @@ mod tests {
 
         let machine_start = Request::MachineStart {
             name: "x".to_string(),
-            config: machine::Config::default(),
+            config: machine::Config {
+                image: Image::parse("ghcr.io/org/name:latest").unwrap(),
+                mounts: Vec::new(),
+                resources: Resources::default(),
+            },
         };
         let line = serde_json::to_string(&machine_start).unwrap();
 
@@ -180,6 +191,17 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Request>(&line).unwrap(),
             machine_list
+        );
+
+        let machine_resolve = Request::MachineResolve {
+            name: "x".to_string(),
+        };
+        let line = serde_json::to_string(&machine_resolve).unwrap();
+
+        assert_eq!(line, r#"{"machine_resolve":{"name":"x"}}"#);
+        assert_eq!(
+            serde_json::from_str::<Request>(&line).unwrap(),
+            machine_resolve
         );
     }
 
@@ -229,19 +251,26 @@ mod tests {
 
         let done = Reply::Done(MachineStatus {
             status: status.clone(),
-            config: None,
+            record: None,
         });
         assert_eq!(
             serde_json::to_string(&done).unwrap(),
-            r#"{"done":{"status":{"name":"x","state":"running","pid":4242},"config":null}}"#
+            r#"{"done":{"status":{"name":"x","state":"running","pid":4242},"record":null}}"#
         );
 
         let done = Reply::Done(MachineStatus {
             status,
-            config: Some(machine::Config::default()),
+            record: Some(machine::Record {
+                digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+                config: machine::Config {
+                    image: Image::parse("ghcr.io/org/name:latest").unwrap(),
+                    mounts: Vec::new(),
+                    resources: Resources::default(),
+                },
+            }),
         });
         let line = serde_json::to_string(&done).unwrap();
 
-        assert!(line.contains(r#""config":{"mounts":[]"#));
+        assert!(line.contains(r#""record":{"digest":"#), "{line}");
     }
 }

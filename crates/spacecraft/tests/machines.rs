@@ -3,7 +3,8 @@
 use spacecraft::config::{Mount, Resources};
 use spacecraft::daemon::api::{MachineStart, MachineStatus, MachineStop, Request};
 use spacecraft::daemon::client::Client;
-use spacecraft::machine::{Config, State, Status};
+use spacecraft::image::{Digest, Image};
+use spacecraft::machine::{Config, Record, State, Status};
 use spacecraft::{Error, Result};
 use std::fmt::Debug;
 use std::fs;
@@ -16,8 +17,15 @@ use tempfile::TempDir;
 
 mod common;
 
-/// What a marker written by hand holds: any valid configuration.
-const MARKER: &str = "[resources]\ncpus = 1\n";
+/// What a marker written by hand holds: any valid record.
+const MARKER: &str = r#"digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[config]
+image = "ghcr.io/org/name:latest"
+
+[config.resources]
+cpus = 1
+"#;
 
 #[test]
 fn starts_and_reports_a_machine() {
@@ -30,12 +38,12 @@ fn starts_and_reports_a_machine() {
         client.machine_status("alpha").unwrap(),
         MachineStatus {
             status: running("alpha"),
-            config: Some(config()),
+            record: Some(record()),
         }
     );
     assert_eq!(
         read_marker(dir.path(), "alpha"),
-        config().to_toml().unwrap()
+        record().to_toml().unwrap()
     );
 }
 
@@ -58,23 +66,99 @@ fn start_refuses_a_different_configuration() {
     let (dir, client) = daemon();
     client.machine_start("alpha", config()).unwrap();
 
-    let other = Config {
-        resources: Resources {
-            cpus: Some(1),
-            ..Resources::default()
+    // Other resources, or another image, make another configuration.
+    let others = [
+        Config {
+            resources: Resources {
+                cpus: Some(1),
+                ..Resources::default()
+            },
+            ..config()
         },
-        ..Config::default()
+        Config {
+            image: Image::parse("ghcr.io/org/other:latest").unwrap(),
+            ..config()
+        },
+    ];
+    for other in others {
+        let message = error_message(client.machine_start("alpha", other));
+
+        assert_eq!(
+            message,
+            "machine alpha is running with a different configuration; run `spacecraft machine stop alpha` to discard it, then start it again"
+        );
+        assert_eq!(
+            read_marker(dir.path(), "alpha"),
+            record().to_toml().unwrap()
+        );
+    }
+}
+
+#[test]
+fn start_resolves_only_a_new_machine() {
+    let (dir, client) = daemon();
+    // The fake fails to resolve this image, so a start that resolved it would fail.
+    let unresolvable = Config {
+        image: Image::parse("ghcr.io/org/unresolvable:latest").unwrap(),
+        ..config()
     };
-    let message = error_message(client.machine_start("alpha", other));
+    let record = Record {
+        digest: Digest::parse(&format!("sha256:{}", "f".repeat(64))).unwrap(),
+        config: unresolvable.clone(),
+    };
+    let marker = common::marker(dir.path(), "beta");
+    fs::write(marker, record.to_toml().unwrap()).unwrap();
+
+    // A kept machine is compared with its record, and the engine is asked nothing.
+    assert_eq!(
+        client.machine_start("beta", unresolvable).unwrap(),
+        MachineStart::AlreadyRunning(running("beta"))
+    );
+}
+
+#[test]
+fn a_failed_resolution_leaves_no_machine() {
+    let (dir, client) = daemon();
+    // The fake fails to resolve this one image.
+    let unresolvable = Config {
+        image: Image::parse("ghcr.io/org/unresolvable:latest").unwrap(),
+        ..config()
+    };
+    let expected = "failed to resolve image ghcr.io/org/unresolvable:latest: the fake registry has no such image";
 
     assert_eq!(
-        message,
-        "machine alpha is running with a different configuration; run `spacecraft machine stop alpha` to discard it, then start it again"
+        error_message(client.machine_start("gamma", unresolvable.clone())),
+        expected
     );
+    assert!(!common::marker(dir.path(), "gamma").exists());
+    // The claim dropped with the failure, so the second start resolves again, and fails the
+    // same way.
     assert_eq!(
-        read_marker(dir.path(), "alpha"),
-        config().to_toml().unwrap()
+        error_message(client.machine_start("gamma", unresolvable)),
+        expected
     );
+}
+
+#[test]
+fn start_refuses_an_invalid_image_over_the_socket() {
+    let (dir, _client) = daemon();
+    let mut stream = UnixStream::connect(dir.path().join("daemon.sock")).unwrap();
+
+    // The daemon parses the image as it reads the request, so `start` never sees an invalid
+    // one.
+    writeln!(
+        stream,
+        r#"{{"machine_start":{{"name":"alpha","config":{{"image":"alpine"}}}}}}"#
+    )
+    .unwrap();
+    let mut reply = String::new();
+    BufReader::new(&stream).read_line(&mut reply).unwrap();
+
+    assert!(
+        reply.starts_with(r#"{"error":{"message":"invalid request: "#),
+        "{reply}"
+    );
+    assert!(!common::marker(dir.path(), "alpha").exists());
 }
 
 #[test]
@@ -111,7 +195,7 @@ fn concurrent_operations_on_one_name_are_refused() {
     let report = client.machine_status("slow").unwrap();
     assert_eq!(report.status.state, State::Starting);
     assert_eq!(report.status.pid, None);
-    assert_eq!(report.config, Some(config()));
+    assert_eq!(report.record, Some(record()));
     assert_eq!(
         error_message(client.machine_start("slow", config())),
         "machine slow is starting"
@@ -130,7 +214,7 @@ fn start_heals_a_dead_machine() {
 
     // The fake reports `dead` as failed even after a boot, so only the variant counts.
     assert!(matches!(started, MachineStart::Started(_)));
-    assert_eq!(read_marker(dir.path(), "dead"), config().to_toml().unwrap());
+    assert_eq!(read_marker(dir.path(), "dead"), record().to_toml().unwrap());
 }
 
 #[test]
@@ -152,11 +236,11 @@ fn start_refuses_a_machine_the_engine_cannot_report() {
 #[test]
 fn start_resumes_a_paused_machine() {
     let (dir, client) = daemon();
-    // The marker holds `config()`, so the configurations match. Its modification time moves
+    // The marker holds `record()`, so the configurations match. Its modification time moves
     // into the past, so a marker written anew would show. `set_modified` works on an open file;
     // opening it for writing without `truncate` keeps its content.
     let marker = common::marker(dir.path(), "frozen");
-    fs::write(&marker, config().to_toml().unwrap()).unwrap();
+    fs::write(&marker, record().to_toml().unwrap()).unwrap();
     let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
     fs::File::options()
         .write(true)
@@ -178,7 +262,7 @@ fn start_resumes_a_paused_machine() {
     // `start` resumed the machine.
     assert_eq!(
         read_marker(dir.path(), "frozen"),
-        config().to_toml().unwrap()
+        record().to_toml().unwrap()
     );
     assert_eq!(fs::metadata(&marker).unwrap().modified().unwrap(), long_ago);
 }
@@ -222,7 +306,7 @@ fn a_failed_rollback_keeps_the_record() {
     );
     assert_eq!(
         read_marker(dir.path(), "wreck"),
-        config().to_toml().unwrap()
+        record().to_toml().unwrap()
     );
     assert_eq!(
         client.machine_status("wreck").unwrap().status.state,
@@ -254,13 +338,17 @@ fn rejects_case_aliases() {
     client.machine_start("alpha", config()).unwrap();
 
     // A different configuration, so an overwritten marker would show.
+    let other = Config {
+        image: Image::parse("ghcr.io/org/other:latest").unwrap(),
+        ..config()
+    };
     assert_eq!(
-        error_message(client.machine_start("Alpha", Config::default())),
+        error_message(client.machine_start("Alpha", other)),
         r#"invalid machine name "Alpha": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit"#
     );
     assert_eq!(
         read_marker(dir.path(), "alpha"),
-        config().to_toml().unwrap()
+        record().to_toml().unwrap()
     );
     assert_eq!(
         client.machine_status("alpha").unwrap().status,
@@ -346,7 +434,14 @@ fn accepts_a_large_configuration() {
     let started = client.machine_start("large", large.clone()).unwrap();
 
     assert_eq!(started, MachineStart::Started(running("large")));
-    assert_eq!(client.machine_status("large").unwrap().config, Some(large));
+    assert_eq!(
+        client
+            .machine_status("large")
+            .unwrap()
+            .record
+            .map(|record| record.config),
+        Some(large)
+    );
 }
 
 #[test]
@@ -367,7 +462,7 @@ fn a_departed_client_does_not_corrupt_the_record() {
         client.machine_status("slow").unwrap(),
         MachineStatus {
             status: running("slow"),
-            config: Some(config()),
+            record: Some(record()),
         }
     );
 }
@@ -414,7 +509,7 @@ fn a_failed_stop_keeps_the_record() {
     // The machine may still exist, so its marker stays and `status` still reaches it.
     assert_eq!(
         read_marker(dir.path(), "stubborn"),
-        config().to_toml().unwrap()
+        record().to_toml().unwrap()
     );
     assert_eq!(
         client.machine_status("stubborn").unwrap().status,
@@ -432,6 +527,29 @@ fn stopping_a_machine_the_engine_lost_cleans_up() {
 
     assert_eq!(stopped, MachineStop::NotRunning);
     assert!(!common::marker(dir.path(), "ghost").exists());
+}
+
+#[test]
+fn stop_announces_before_destroying() {
+    let (_dir, client) = daemon();
+    client.machine_start("announced", config()).unwrap();
+
+    let stopped = client.machine_stop("announced").unwrap();
+
+    assert_eq!(stopped, MachineStop::Stopped);
+    common::assert_announced("announced", "spacecraft machine stop announced");
+}
+
+#[test]
+fn a_failed_announcement_does_not_block_the_stop() {
+    let (dir, client) = daemon();
+    // The fake's `exec` fails for `mute`.
+    client.machine_start("mute", config()).unwrap();
+
+    let stopped = client.machine_stop("mute").unwrap();
+
+    assert_eq!(stopped, MachineStop::Stopped);
+    assert!(!common::marker(dir.path(), "mute").exists());
 }
 
 #[test]
@@ -541,6 +659,72 @@ fn list_skips_foreign_entries() {
 }
 
 #[test]
+fn resolve_of_an_unknown_machine_fails() {
+    let (_dir, client) = daemon();
+
+    assert_eq!(
+        error_message(client.machine_resolve("nope")),
+        "machine nope not found"
+    );
+    assert_eq!(
+        error_message(client.machine_resolve("a/b")),
+        r#"invalid machine name "a/b": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit"#
+    );
+}
+
+#[test]
+fn resolve_during_a_boot_is_refused() {
+    let (dir, client) = daemon();
+    let other = Client::new(dir.path().to_path_buf());
+    let boot = thread::spawn(move || other.machine_start("slow", config()));
+    // The fake boots `slow` in 200 ms, so 50 ms in, the boot is still in flight.
+    thread::sleep(Duration::from_millis(50));
+
+    assert_eq!(
+        error_message(client.machine_resolve("slow")),
+        "machine slow is starting"
+    );
+
+    let started = boot.join().unwrap().unwrap();
+    assert_eq!(started, MachineStart::Started(running("slow")));
+    client.machine_resolve("slow").unwrap();
+}
+
+#[test]
+fn resolve_during_a_stop_is_refused() {
+    // The stop below never ends, so the teardown gives up on it after 200 ms.
+    let (dir, client, daemon) = daemon_with_teardown(Duration::from_millis(200));
+    // The fake never answers about `hung`, so the engine hangs on its stop.
+    write_marker(dir.path(), "hung");
+    let other = Client::new(dir.path().to_path_buf());
+    // The stop hangs in the engine. The thread is never joined: it ends when the daemon closes
+    // the connection.
+    thread::spawn(move || other.machine_stop("hung"));
+    // 50 ms in, the stop holds the name.
+    thread::sleep(Duration::from_millis(50));
+
+    assert_eq!(
+        error_message(client.machine_resolve("hung")),
+        "machine hung is stopping"
+    );
+
+    // The hung stop keeps the daemon's lock, so `Client::shutdown` would wait 5 minutes for
+    // it. The test shuts the daemon down by hand instead, and joins it.
+    force_shutdown(dir.path());
+    let (result, _) = daemon.join().unwrap();
+    result.unwrap();
+}
+
+#[test]
+fn resolve_needs_no_engine() {
+    let (dir, client) = daemon();
+    // The fake fails to report `flaky`, so a resolve that asked the engine would fail.
+    write_marker(dir.path(), "flaky");
+
+    client.machine_resolve("flaky").unwrap();
+}
+
+#[test]
 fn records_survive_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     // Written before the daemon starts: the new daemon learns of `alpha` from the disk alone.
@@ -629,8 +813,25 @@ fn forced_shutdown_reports_a_stubborn_machine() {
     // The machine may still exist, so its marker stays for a later `stop`.
     assert_eq!(
         read_marker(dir.path(), "stubborn"),
-        config().to_toml().unwrap()
+        record().to_toml().unwrap()
     );
+}
+
+#[test]
+fn forced_shutdown_announces_the_daemon_stop() {
+    let (dir, client, daemon) = daemon_with_thread();
+    // Names no other test uses: every test in this binary records into the fake's one log.
+    client.machine_start("delta", config()).unwrap();
+    client.machine_start("epsilon", config()).unwrap();
+
+    client.shutdown(true).unwrap();
+
+    let (result, _out) = daemon.join().unwrap();
+    result.unwrap();
+    for name in ["delta", "epsilon"] {
+        common::assert_announced(name, "the spacecraft daemon is stopping");
+        assert!(!common::marker(dir.path(), name).exists());
+    }
 }
 
 #[test]
@@ -775,7 +976,7 @@ fn a_hung_boot_keeps_its_record_at_shutdown() {
     );
     assert!(out.ends_with("\nstopped\n"), "{out}");
     // The boot may still finish, so the marker stays for the next daemon.
-    assert_eq!(read_marker(dir.path(), "hung"), config().to_toml().unwrap());
+    assert_eq!(read_marker(dir.path(), "hung"), record().to_toml().unwrap());
 }
 
 #[test]
@@ -856,11 +1057,46 @@ fn a_teardown_bound_too_large_to_add_still_stops_the_machines() {
     assert!(!common::marker(dir.path(), "alpha").exists());
 }
 
-/// Starts a daemon in a fresh state directory and returns the directory and a client.
-fn daemon() -> (TempDir, Client) {
-    let (dir, client, _) = daemon_with_thread();
+/// Starts a daemon in a fresh state directory and returns the daemon and a client.
+fn daemon() -> (Daemon, Client) {
+    let (dir, client, thread) = daemon_with_thread();
 
-    (dir, client)
+    (
+        Daemon {
+            dir,
+            thread: Some(thread),
+        },
+        client,
+    )
+}
+
+/// A test's daemon in its state directory. Dropping it shuts the daemon down and joins its
+/// thread, so no daemon, and none of its open files, outlives its test. The tests run in
+/// parallel, and daemons left running would exhaust the open-file limit, 256 by default on
+/// macOS.
+struct Daemon {
+    /// The state directory, removed once the daemon has stopped.
+    dir: TempDir,
+    /// The daemon's thread, which `drop` takes to join it.
+    thread: Option<DaemonThread>,
+}
+
+impl Daemon {
+    /// The daemon's state directory.
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        // The test may have shut its daemon down already, so both results are ignored: `drop`
+        // runs while a failed test unwinds too, and a panic there would abort the run.
+        let _ = Client::new(self.path().to_path_buf()).shutdown(true);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// A daemon's thread: `join` yields the daemon's result and output once it exits.
@@ -898,11 +1134,21 @@ fn force_shutdown(dir: &Path) {
 /// The configuration the tests start machines with.
 fn config() -> Config {
     Config {
+        image: Image::parse("ghcr.io/org/name:latest").unwrap(),
+        mounts: Vec::new(),
         resources: Resources {
             cpus: Some(2),
             ..Resources::default()
         },
-        ..Config::default()
+    }
+}
+
+/// What the marker of a machine started with `config()` holds: the fake engine's digest, and
+/// the configuration.
+fn record() -> Record {
+    Record {
+        digest: Digest::parse(&format!("sha256:{}", "f".repeat(64))).unwrap(),
+        config: config(),
     }
 }
 
@@ -935,7 +1181,7 @@ fn write_marker(dir: &Path, name: &str) {
 fn read_marker(dir: &Path, name: &str) -> String {
     fs::read_to_string(common::marker(dir, name)).unwrap()
 }
-//
+
 /// Returns the message of the error the daemon replied with.
 fn error_message<T: Debug>(result: Result<T>) -> String {
     match result {

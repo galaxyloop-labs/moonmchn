@@ -6,9 +6,11 @@ overview and the commands.
 ## Workspace
 
 Command modules live in `crates/spacecraft-cli/src/commands/`, one per subcommand.
-Each needs only the core library, except `daemon`, which names
-`spacecraft_smolmachines::Engine` to run the daemon for `--detached`. `machine`
-talks to the daemon through the core library's client.
+Each needs only the core library, except two that name the adapter crate: `daemon`,
+which names `spacecraft_smolmachines::Engine` to run the daemon for `--detached`,
+and `machine`, which names `spacecraft_smolmachines::session` to open `exec` and
+`shell` sessions. `machine` talks to the daemon through the core library's client.
+The adapter also resolves image digests, behind `Engine::image_digest`.
 
 `Config` stays in `spacecraft::config`; `Resources`, `Mount`, `Port`, and
 `EgressInterceptor` are implemented in separate modules and remain available
@@ -96,7 +98,7 @@ Detection reports host capabilities, not a verified guest graphics stack. Linux
 GPU graphics still needs virglrenderer and Vulkan drivers; CUDA needs the NVIDIA
 CUDA driver library and the guest shim. smolvm 1.20.2 CUDA remoting is experimental
 Driver-API support, not general CUDA Runtime/PyTorch support. Also, the Rust SDK
-1.20.2 retains `resources.cuda` and `resources.gpu_vram_mib` in `MachineConfig`
+1.29.1 retains `resources.cuda` and `resources.gpu_vram_mib` in `MachineConfig`
 but does not currently forward them as `--cuda` and `--gpu-vram` during local
 creation. Detection and serialization do not fix these upstream launch
 limitations; both are marked `FIXME` in the `spacecraft-smolmachines` adapter.
@@ -157,48 +159,66 @@ machine SDK are confined to their respective crates.
 `spacecraft::machine` is the extension point for engines, and the core crate never
 names a machine SDK:
 
-- `Engine` names a backend's machine type (`type Machine: Machine`) and has no
-  methods.
-- `Machine` carries the behavior: `start(name, config)` creates and boots a
-  machine, `attach(name)` reopens a handle by name, `status()` reports a `Status`
-  (name, `State`, optional pid), `resume()` resumes a paused machine's saved
-  execution, and `stop(self)` destroys the machine with its disks.
+- `Engine` names a backend's machine type (`type Machine: Machine`) and resolves
+  images: `image_digest(image)` returns the digest of the content an image names,
+  which the machine about to boot then runs pinned.
+- `Machine` carries the behavior: `start(name, record)` creates and boots a
+  machine from its `Record`, the configuration plus that digest; `attach(name)`
+  reopens a handle by name; `status()` reports a `Status` (name, `State`, optional
+  pid); `resume()` resumes a paused machine's saved execution; `exec(command,
+  timeout)` runs a command in the guest as the image's user, with no input and its
+  output discarded, and returns its exit status, giving up once `timeout` passes;
+  and `stop(self)` destroys the machine with its disks.
 - `daemon::serve::<E>(out)` runs the daemon with engine `E`. The CLI chooses the
   engine by type: `serve::<spacecraft_smolmachines::Engine>(out)`.
 
 A backend implements both traits and passes its engine type to the daemon:
 
 ```rust
-use spacecraft::machine::{Config, Engine, Machine, Status};
+use std::time::Duration;
+
+use spacecraft::image::{Digest, Image};
+use spacecraft::machine::{Engine, Machine, Record, Status};
 
 struct MyEngine;
 struct MyMachine;
 
 impl Engine for MyEngine {
     type Machine = MyMachine;
+
+    fn image_digest(image: &Image) -> spacecraft::Result<Digest> { todo!() }
 }
 
 impl Machine for MyMachine {
-    fn start(name: &str, config: Config) -> spacecraft::Result<Self> { todo!() }
+    fn start(name: &str, record: Record) -> spacecraft::Result<Self> { todo!() }
     fn attach(name: &str) -> spacecraft::Result<Self> { todo!() }
     fn status(&self) -> spacecraft::Result<Status> { todo!() }
     fn resume(&self) -> spacecraft::Result<()> { todo!() }
+    fn exec(&self, command: &[String], timeout: Duration) -> spacecraft::Result<i32> { todo!() }
     fn stop(self) -> spacecraft::Result<()> { todo!() }
 }
 
 spacecraft::daemon::serve::<MyEngine>(&mut std::io::stdout())?;
 ```
 
-The daemon calls every `Machine` method on a blocking thread, one handle per
-request, so implementations may block.
+The daemon calls `image_digest` and every `Machine` method on a blocking thread,
+one handle per request, so implementations may block.
+
+`machine exec` and `machine shell` first send the daemon a `machine_resolve` request,
+which succeeds once the daemon owns the machine and no start or stop holds it. The
+session then reaches the machine by its name, which is how the engine addresses it
+on this host.
 
 ### smolmachines adapter
 
 `spacecraft_smolmachines::Engine` and `spacecraft_smolmachines::Machine` implement
 those traits with the SDK; the adapter's `Machine` wraps an SDK machine handle.
 
-`spacecraft_smolmachines::machine_config(config, name)` replaces
-`config.into_machine_config(name)`. The adapter also exposes
+`spacecraft_smolmachines::machine_config(record, name)` replaces
+`config.into_machine_config(name)`; it boots the record's image pinned to its
+digest, with networking on. `spacecraft_smolmachines::session(name, command, tty)`
+returns the engine client's command line for an `exec` or `shell` session,
+which the CLI runs in place of itself. The adapter also exposes
 `resources(&resources)`, `mount(mount)`, `port(port)`, and
 `egress_interceptor(interceptor)` in place of the previous SDK `From`
 implementations. These are functions because both configuration and SDK types
@@ -286,8 +306,9 @@ closes.
 | `{"shutdown":{"force":true}}` | `{"done":null}`, then the daemon stops every machine and exits |
 | `{"machine_start":{"name":"x","config":{…}}}` | `{"done":{"started":{"name":"x","state":"running","pid":4242}}}`, or `already_running` in place of `started` |
 | `{"machine_stop":{"name":"x"}}` | `{"done":"stopped"}` or `{"done":"not_running"}` |
-| `{"machine_status":{"name":"x"}}` | `{"done":{"status":{"name":"x","state":"running","pid":4242},"config":{…}}}` |
+| `{"machine_status":{"name":"x"}}` | `{"done":{"status":{"name":"x","state":"running","pid":4242},"record":{"digest":"sha256:…","config":{…}}}}` |
 | `{"machine_list":{}}` | `{"done":[{"name":"x","state":"running","pid":4242}]}` |
+| `{"machine_resolve":{"name":"x"}}` | `{"done":null}`, or `{"error":{"message":"machine x not found"}}`, or `machine x is starting` |
 | any other line | `{"error":{"message":"invalid request: …"}}` |
 
 `{"shutdown":{}}` means `"force":false`. A request that fails gets
@@ -317,13 +338,15 @@ daemon the same way:
    most 5 minutes: a request still running then, for example one stuck in an
    engine call, is left behind, and the daemon logs
    `gave up waiting for <n> request(s) after 300s`.
-3. It stops every machine, writing `stopped machine <name>` or
-   `failed to stop machine <name>: <error>` to its log for each, or
-   `failed to list machines: <error>` when it cannot read the records. The stops
-   are bounded to 5 minutes as well. A machine whose stop has not finished by then,
-   or whose start or stop was still running when step 2 gave up, keeps its record
-   and is logged as `failed to stop machine <name>: machine <name> is stopping`
-   (or `starting`).
+3. It stops every machine. Before each stop it announces the stop inside the
+   machine, with the reason `the spacecraft daemon is stopping`, and ends its
+   sessions (see [Lifecycle](#lifecycle)), which adds at most 5 seconds. It writes
+   `stopped machine <name>` or `failed to stop machine <name>: <error>` to its log
+   for each, or `failed to list machines: <error>` when it cannot read the
+   records. The stops are bounded to 5 minutes as well. A machine whose stop has
+   not finished by then, or whose start or stop was still running when step 2 gave
+   up, keeps its record and is logged as
+   `failed to stop machine <name>: machine <name> is stopping` (or `starting`).
 4. It writes `stopped` to its log and exits.
 
 An unforced `daemon stop` only gets past the refusal with no machines, so
@@ -341,42 +364,105 @@ starts one.
 | Command | Prints | Exit code |
 |---|---|---|
 | `machine start x` | `Machine x started (pid N)`, or `Machine x already running (pid N)` | 0 |
+| `machine start x --image <image>` | the same, booting that image; see [Images](#images) | 0 |
 | `machine stop x` | `Machine x stopped`, or `Machine x not running` | 0 |
 | `machine status x` | `running (pid N)`, `starting`, `stopping`, `paused`, `failed` or `unknown` | 0 |
 | `machine status --extended x` | the block below | 0 |
 | `machine list` | one `x  running (pid N)` line per machine, sorted by name; nothing when there are none | 0 |
-| `machine status x` for an unknown name, with or without `--extended` | `error: machine x not found` | 1 |
+| `machine exec x -- <command>…` | whatever the command prints; see [Sessions](#sessions) | the command's |
+| `machine shell x` | a login shell as `spacecraft`, in `/home/spacecraft` | the shell's |
+| `machine status x`, `machine exec x` or `machine shell x` for an unknown name | `error: machine x not found` | 1 |
 | `machine start Alpha` | `error: invalid machine name "Alpha": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit` | 1 |
 | `machine start x`, with a relative mount source such as `./data` | `error: invalid mount source "./data": a host directory must be an absolute path` | 1 |
+| `machine start x --image alpine`, a reference without its registry host | `error: invalid image "alpine": a registry reference must start with its registry host` | 1 |
+| `machine start x --image -` | `error: invalid image "-": an image on stdin is not supported; pass the archive's path` | 1 |
+| `machine start x --image ./rootfs/`, a directory | `error: invalid image "./rootfs/": a local image must be a docker save archive file` | 1 |
+| `machine start x --image ghcr.io/org/private:tag`, a private image | `error: failed to resolve image ghcr.io/org/private:tag: 403 Forbidden from https://ghcr.io/token: …`; see [Images](#images) | 1 |
 | `machine start x`, for a record the engine cannot report | ``error: the engine cannot report machine x; retry, or run `spacecraft machine stop x` to discard it`` | 1 |
-| `machine start x`, running or paused with a different configuration | ``error: machine x is running with a different configuration; run `spacecraft machine stop x` to discard it, then start it again`` | 1 |
-| `machine start x` or `machine stop x` while another client starts or stops `x` | `error: machine x is starting`, or `stopping` | 1 |
+| `machine start x`, running or paused with a different configuration or image | ``error: machine x is running with a different configuration; run `spacecraft machine stop x` to discard it, then start it again`` | 1 |
+| `machine start`, `stop`, `exec` or `shell` on `x` while another client starts or stops `x` | `error: machine x is starting`, or `stopping` | 1 |
+| `machine exec x` without `--` and a command | clap's usage error | 2 |
+| `machine exec` or `machine shell`, when the machine stops during the session | the announcement, then the session ends; see [Lifecycle](#lifecycle) | 129 |
+| `machine exec` or `machine shell`, on a record left by a reboot | the engine client's own message, such as `Error: vm not found: x` | the client's |
+| `machine exec` or `machine shell`, with no engine and no download allowed, or `SMOLVM` naming no file | `error: the engine failed: …` | 1 |
+| `machine exec` or `machine shell`, with `SMOLVM` naming a file that cannot run | `error: failed to run the engine client <path>: …` | 1 |
 | any machine command with no daemon running | `error: the daemon is not running` | 1 |
 
 Errors go to stderr. ` (pid N)` appears wherever the engine reports a pid.
 
 `machine status --extended x` (`-e`) prints the name and state, a blank line, then
-the configuration the machine was started with, as TOML, so it diffs against
-`config.toml` by eye:
+the machine's record, as TOML: the digest its image resolved to, then the
+configuration it was started with (see [Records](#records)):
 
 ```
 Name:   alpha
 State:  running (pid 4242)
 
+digest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+
+[config]
+image = "ghcr.io/galaxyloop-labs/spacecraft-images:default"
 mounts = []
 
-[resources]
+[config.resources]
 cpus = 4
 memory = 4096
 network = true
 ```
 
-The TOML part is left out when the record holds no configuration, for example
-during the moment between a boot claiming the name and writing its record.
+The TOML part is left out when there is no record yet, for example during the
+moment between a boot claiming the name and writing its record.
 
 `machine start` reads `config.toml` (see [Directories](#directories)) and sends it
 with the request; the daemon reads no user files. Every machine starts from that
-one configuration, and the name is the only per-machine input.
+one configuration; the name and `--image` are the only per-machine inputs.
+
+### Images
+
+`machine start x` boots `DEFAULT_IMAGE`,
+`ghcr.io/galaxyloop-labs/spacecraft-images:default`, unless `--image` names another
+in one of two forms:
+
+- A registry reference that starts with its registry host, such as
+  `ghcr.io/org/name:tag`; the tag defaults to `latest`, and
+  `ghcr.io/org/name@sha256:<64 hex digits>` names one content exactly. A bare name
+  such as `alpine` is refused: registries disagree on what it means.
+- The path of a `docker save` archive: one that starts with `/`, `./` or `../`, or
+  ends in `.tar`, `.tar.gz` or `.tgz`. The CLI makes it absolute against its own
+  working directory before sending it, since the daemon runs elsewhere.
+
+When a new machine boots, the daemon resolves its image to a digest, `sha256:` and
+64 hex digits, and records both: a registry tag by asking the registry for the
+digest it points at, an archive by the image id its `manifest.json` names. The engine then
+boots the image pinned to that digest, `host/path@sha256:…` for a registry image,
+so the machine runs exactly what was recorded even if the tag moves meanwhile. A
+machine that exists is never resolved again: `machine start` on it compares
+configurations only, so it needs no network and treats a moved tag as the same
+machine. `machine stop` then `machine start` boots the tag's new content.
+
+The daemon asks registries anonymously, over `https`. A private image fails to
+resolve: ghcr.io refuses the anonymous token with `403 Forbidden`, and other
+registries may answer `401`. Boot it by its digest instead, which needs no request:
+`--image <repository>@sha256:<digest>`. The engine pulls it with the credentials in
+its registries file (see [Engine](#engine)).
+
+### Sessions
+
+`machine exec x -- <command>…` and `machine shell x` ask the daemon for the
+machine, then replace the CLI with the engine's client, which carries the session:
+stdin, stdout and stderr pass through untouched, and the exit status is the
+command's. Both run as `spacecraft` in `/home/spacecraft`; `shell` opens a login
+shell, `sh -l`, with a terminal.
+
+- The command after `--` is argv end to end: nothing splits or quotes it, so
+  `exec x -- sh -c 'a b'` passes `a b` as one argument. Pipes and redirects meant
+  for the machine go through `sh -c`.
+- Stdin reaches the command byte for byte, and its end ends the command's input:
+  `exec x -- cat < file` copies the file exactly.
+- `exec` gives the command a terminal when stdin, stdout and stderr are all
+  terminals, so programs such as `vi` and `top` work; a pipe or a redirect on any
+  of them keeps the bytes exact and stderr apart. `--no-tty` gives no terminal even
+  then, for a script run from a terminal.
 
 ### States
 
@@ -411,10 +497,28 @@ given up on as well. A client that times out, or is
 interrupted, leaves the daemon finishing the operation: the record ends consistent,
 and `machine status` shows the outcome.
 
+Before every stop, by `machine stop`, `daemon stop --force` or `SIGTERM`, the daemon
+announces it inside the machine. Every terminal in the guest shows:
+
+```
+Broadcast message from spacecraft:
+
+Machine x is stopping now: spacecraft machine stop x.
+```
+
+with `the spacecraft daemon is stopping` as the reason when the daemon itself stops.
+The daemon then hangs up every session, so each `machine exec` and `machine shell`
+ends with exit status 129 before the machine disappears, and the stop follows at
+once. The announcement is best effort: Spacecraft gives up on it after 5 seconds,
+a failure is ignored, and it never blocks the stop.
+
 ### Records
 
 The daemon keeps one record per machine, `machines/<name>` in the state directory,
-holding the configuration the machine was started with, as TOML. A record:
+holding what the machine was booted from, as TOML: first `digest`, the digest its
+image resolved to, then the `[config]` table, the configuration it was started
+with, the image as given included. `machine status --extended` prints it, as in
+the block above. A record:
 
 - is written before the boot, so its modification time is the start time;
 - is removed only once the engine confirms the machine is gone: `machine stop`
@@ -424,7 +528,9 @@ holding the configuration the machine was started with, as TOML. A record:
 - stays when a boot fails and deleting the half-created machine fails too, and
   `machine stop` retries the deletion;
 - survives daemon restarts, so a new daemon reports on the machines an earlier one
-  started.
+  started;
+- is enough to boot the same content again: `--image <repository>@<digest>` for a
+  registry image, and the same archive file, kept unchanged, for a local one.
 
 Machine names use lowercase letters, digits, `_`, `.` and `-`, and start with a
 letter or digit. Records are file names, and macOS volumes are case-insensitive by
@@ -432,8 +538,8 @@ default, so `alpha` and `Alpha` would share one record.
 
 ### Engine
 
-The daemon drives machines through smolmachines. Unless a compatible `smolvm` is
-installed, on `PATH` or as `~/.local/bin/smolvm` or `~/.smolvm/smolvm`, the SDK
+The daemon drives machines through smolmachines 1.29.1. Unless a compatible `smolvm`
+is installed, on `PATH` or as `~/.local/bin/smolvm` or `~/.smolvm/smolvm`, the SDK
 downloads its pinned, checksum-verified engine (about 37 MiB) on the first
 `machine start`, into its cache: `$SMOLMACHINES_CACHE_DIR`, else
 `$XDG_CACHE_HOME/smolmachines`, else `~/Library/Caches/smolmachines` on macOS and
@@ -442,24 +548,71 @@ and `SMOLVM` points the SDK at an engine binary of your choice. The daemon inher
 the environment of the `daemon start` that launched it, so export these variables
 before `daemon start`.
 
-`resources.network` is not forwarded: the adapter creates every machine without
-networking, so `status --extended` can show `network = true` for a guest that has
-none.
+`machine exec` and `machine shell` run the engine's client found by the same rule,
+the SDK's `engine_cli()`, in the CLI's own environment: `SMOLVM` when set, else a
+compatible `smolvm` on `PATH`, else the pinned engine. Both run as `spacecraft` in
+`/home/spacecraft`.
+
+Every machine boots its image pinned to its recorded digest, with networking on:
+the engine refuses a registry image on a machine without networking.
+`resources.network` is still not forwarded: the adapter turns networking on for
+every machine and ignores the key, so `status --extended` can show
+`network = false` for a guest that has networking.
+
+The engine pulls a private registry image with the credentials in its registries
+file, `~/.config/smolvm/config.toml`; `smolvm config registries init` writes an
+example.
+
+### Guest contract
+
+Any image a machine boots must provide the following. The image is yours: built and
+published outside this repository, for `linux/arm64` and `linux/amd64`, and named by
+`--image`, or the official one `DEFAULT_IMAGE` names.
+
+- A user `spacecraft` (uid 1000, home `/home/spacecraft`, shell `/bin/sh`), no
+  password, no `sudo`, no `doas`, no privileged groups.
+- `sh`, `printf` and `tee` on the image's PATH, for the announcement; `kill`, which
+  ends the sessions, is `sh`'s builtin.
+- No ENTRYPOINT and no CMD, so the machine boots to the engine's agent and stays up.
+  A long-lived one works too.
+- `USER spacecraft`, so an `exec` without `--user`, the announcement's included,
+  runs as `spacecraft`.
+- `/dev/pts` mounted, which the engine's guest init already does.
 
 ### Not implemented yet
 
-- Images: a machine boots the engine's bare root filesystem.
+- An `image` key in `config.toml`: every machine boots `DEFAULT_IMAGE` or the
+  `--image` given.
 - `machine restart`: run `machine stop x && machine start x`.
 
 ## Known limitations
 
-- `kill -9` and the OOM killer skip the teardown. Machines keep running unobserved
-  until the next `daemon start`, whose `machine list` shows them again from their
-  records.
+- `kill -9` and the OOM killer skip the teardown, announcements included, so a
+  machine that stops without one points at a malfunction. Machines keep running
+  unobserved until the next `daemon start`, whose `machine list` shows them again
+  from their records.
 - After a reboot, or a crash that took the machines down, their records remain.
   `machine list` keeps showing them, as `failed` when the engine reports them dead
   and as `unknown` when it cannot report them, until `machine stop <name>` confirms
-  each with the engine and removes the record.
+  each with the engine and removes the record. Until then `machine exec` and
+  `machine shell` resolve such a record and fail at the engine, with its message.
+- A private image cannot be resolved, since the daemon asks registries anonymously.
+  Boot it by its digest, with the engine's registries file holding the credentials
+  for the pull (see [Images](#images)).
+- A registry that omits `Docker-Content-Digest` on `HEAD`, or answers
+  `WWW-Authenticate: Basic`, cannot be resolved, nor can a registry over plain
+  `http`.
+- A bare reference such as `alpine` is refused: write its registry host.
+- A local archive needs `crane`, `docker` or `podman` on the host for the engine to
+  flatten it, and is read in full whenever a machine boots from it. The engine
+  refuses an archive over 8 GiB.
+- An archive's digest records what ran; booting the same content again needs the
+  archive kept.
+- The first start of a machine pulls its image through the guest's network.
+- A record written before images, without `digest` and `image`, fails to parse:
+  `machine status` fails on it, and `machine exec` and `machine shell` fail at the
+  engine, until `machine stop` removes it and `machine start` boots afresh.
+- The announcement adds up to 5 seconds to every stop.
 - A home on a network filesystem may not support the daemon's socket and lock, or
   the engine's cache. Point `SPACECRAFT_HOME` and `SMOLMACHINES_CACHE_DIR` at a
   local disk.

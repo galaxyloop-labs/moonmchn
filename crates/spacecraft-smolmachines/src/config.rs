@@ -1,63 +1,75 @@
 //! Translate Spacecraft configuration into `smolmachines` SDK types.
 //!
 //! Conversion preserves configured values and leaves unset settings at their SDK
-//! defaults. It does not validate target-specific constraints or create machines;
-//! the SDK remains responsible for those operations.
+//! defaults, with two departures: a registry image boots pinned to its recorded
+//! digest, and every machine gets networking. It does not validate target-specific
+//! constraints or create machines; the SDK remains responsible for those operations.
 //!
 //! # Example
 //!
 //! ```
-//! use spacecraft::{config::Resources, machine::Config};
+//! use spacecraft::config::Resources;
+//! use spacecraft::image::{Digest, Image};
+//! use spacecraft::machine::{Config, Record};
 //!
 //! let config = Config {
+//!     image: Image::parse("ghcr.io/spacecraft-dev/spacecraft:latest").unwrap(),
+//!     mounts: Vec::new(),
 //!     resources: Resources {
 //!         cpus: Some(4),
 //!         memory: Some(4096),
 //!         ..Resources::default()
 //!     },
-//!     ..Config::default()
 //! };
-//! let machine = spacecraft_smolmachines::machine_config(config, "my-machine");
+//! let record = Record {
+//!     digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+//!     config,
+//! };
+//! let machine = spacecraft_smolmachines::machine_config(record, "my-machine");
 //! assert_eq!(machine.name, "my-machine");
 //! assert_eq!(machine.resources.memory_mib, Some(4096));
 //! ```
 
 use spacecraft::{
     config::{EgressInterceptor, Mount, Port, Resources},
-    machine::Config,
+    machine::Record,
 };
 
-/// Converts a machine's configuration into an SDK config with a caller-supplied name.
+/// Converts a machine's record into an SDK config with a caller-supplied name.
 ///
-/// Settings outside mounts and resources keep their SDK defaults. Conversion is
-/// infallible and does not perform validation or machine creation.
+/// A registry image boots as `host/path@sha256:hex`, pinned to the record's digest, and an
+/// archive from its path. Settings outside the image, mounts and resources keep their SDK
+/// defaults. Conversion is infallible and does not perform validation or machine creation.
 #[must_use]
-pub fn machine_config(config: Config, name: impl Into<String>) -> smolmachines::MachineConfig {
+pub fn machine_config(record: Record, name: impl Into<String>) -> smolmachines::MachineConfig {
     smolmachines::MachineConfig {
-        mounts: config.mounts.into_iter().map(mount).collect(),
-        resources: resources(&config.resources),
+        image: Some(record.config.image.pinned(&record.digest)),
+        mounts: record.config.mounts.into_iter().map(mount).collect(),
+        resources: resources(&record.config.resources),
         ..smolmachines::MachineConfig::new(name)
     }
 }
 
 /// Maps VM resources into SDK fields without changing their units or values.
 ///
-/// `smolmachines` 1.20.2 retains GPU shared-memory and CUDA settings in its config,
+/// `smolmachines` 1.29.1 retains GPU shared-memory and CUDA settings in its config,
 /// but does not forward them during local machine creation.
 #[must_use]
 pub fn resources(resources: &Resources) -> smolmachines::Resources {
     smolmachines::Resources {
         cpus: resources.cpus,
         memory_mib: resources.memory,
-        network: Some(false),
+        // Every machine gets networking: the engine refuses a registry image without it,
+        // and the egress policy builds on it.
+        network: Some(true),
         storage_gib: resources.storage,
         overlay_gib: resources.overlay,
         gpu: resources.gpu,
-        // FIXME: smolmachines 1.20.2 does not forward this as --gpu-vram
+        // FIXME: smolmachines 1.29.1 does not forward this as --gpu-vram
         // during local creation. Upgrade or fix its argument mapping before
         // relying on the suggested shared-memory size at launch.
         gpu_vram_mib: resources.gpu_vram,
-        // FIXME: smolmachines 1.20.2 stores this value but does not forward
+        // FIXME: smolmachines 1.29.1 stores this value but does not forward
         // --cuda during local machine creation. Upgrade or fix the SDK's
         // argument mapping before relying on this flag to enable CUDA.
         cuda: resources.cuda,
@@ -91,41 +103,51 @@ pub fn egress_interceptor(interceptor: EgressInterceptor) -> smolmachines::Egres
 mod tests {
     use spacecraft::{
         config::{EgressInterceptor, Mount, Port, Resources},
-        machine::Config,
+        image::{Digest, Image},
+        machine::{Config, Record},
     };
 
     use super::{egress_interceptor, machine_config, mount, port, resources};
 
     #[test]
     fn every_setting_is_preserved_from_config_to_sdk_config() {
-        let config = Config {
-            mounts: vec![
-                Mount {
-                    source: "/host/path with spaces".into(),
-                    target: "/workspace".into(),
-                    read_only: false,
-                    staged: true,
+        let record = Record {
+            digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            config: Config {
+                image: Image::parse("ghcr.io/org/name:latest").unwrap(),
+                mounts: vec![
+                    Mount {
+                        source: "/host/path with spaces".into(),
+                        target: "/workspace".into(),
+                        read_only: false,
+                        staged: true,
+                    },
+                    Mount {
+                        source: "s3://bucket/models".into(),
+                        target: "/models".into(),
+                        read_only: true,
+                        staged: false,
+                    },
+                ],
+                resources: Resources {
+                    cpus: Some(4),
+                    memory: Some(4096),
+                    storage: Some(20),
+                    overlay: Some(10),
+                    gpu: Some(false),
+                    gpu_vram: Some(2048),
+                    cuda: Some(false),
                 },
-                Mount {
-                    source: "s3://bucket/models".into(),
-                    target: "/models".into(),
-                    read_only: true,
-                    staged: false,
-                },
-            ],
-            resources: Resources {
-                cpus: Some(4),
-                memory: Some(4096),
-                storage: Some(20),
-                overlay: Some(10),
-                gpu: Some(false),
-                gpu_vram: Some(2048),
-                cuda: Some(false),
             },
         };
-        let machine = machine_config(config, String::from("unique-machine-name"));
+        let machine = machine_config(record, String::from("unique-machine-name"));
 
         assert_eq!(machine.name, "unique-machine-name");
+        // The registry image boots pinned to the digest its tag resolved to.
+        assert_eq!(
+            machine.image,
+            Some(format!("ghcr.io/org/name@sha256:{}", "a".repeat(64)))
+        );
         assert_eq!(
             machine.mounts,
             [
@@ -138,8 +160,9 @@ mod tests {
             smolmachines::Resources {
                 cpus: Some(4),
                 memory_mib: Some(4096),
-                // Outbound networking is never granted through the configuration.
-                network: Some(false),
+                // Every machine gets networking: the engine refuses a registry image without
+                // it, and the egress policy builds on it.
+                network: Some(true),
                 storage_gib: Some(20),
                 overlay_gib: Some(10),
                 gpu: Some(false),
@@ -150,23 +173,50 @@ mod tests {
     }
 
     #[test]
-    fn default_config_retains_sdk_defaults() {
-        let machine = machine_config(Config::default(), "bare");
+    fn a_local_image_is_passed_as_its_path() {
+        let record = Record {
+            digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            config: Config {
+                image: Image::parse("/abs/guest.tar").unwrap(),
+                mounts: Vec::new(),
+                resources: Resources::default(),
+            },
+        };
+
+        let machine = machine_config(record, "local");
+
+        // A path has no pinned form: the engine boots the file, and the record keeps the
+        // digest it had at boot.
+        assert_eq!(machine.image, Some("/abs/guest.tar".to_string()));
+    }
+
+    #[test]
+    fn a_minimal_config_retains_sdk_defaults() {
+        let record = Record {
+            digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            config: Config {
+                image: Image::parse("ghcr.io/org/name:latest").unwrap(),
+                mounts: Vec::new(),
+                resources: Resources::default(),
+            },
+        };
+        let machine = machine_config(record, "bare");
         let defaults = smolmachines::MachineConfig::new("bare");
 
         assert_eq!(machine.name, defaults.name);
-        // Networking is the one deliberate departure from the SDK defaults.
+        // Networking and the pinned image, which the test above checks, are the deliberate
+        // departures from the SDK defaults.
         assert_eq!(
             machine.resources,
             smolmachines::Resources {
-                network: Some(false),
+                network: Some(true),
                 ..defaults.resources
             }
         );
         assert_eq!(machine.mounts, defaults.mounts);
         assert_eq!(machine.egress_interceptor, defaults.egress_interceptor);
         assert_eq!(machine.wait_for_ports, defaults.wait_for_ports);
-        assert_eq!(machine.image, defaults.image);
+        // No command: the image's own entrypoint runs.
         assert_eq!(machine.command, defaults.command);
         assert_eq!(machine.env, defaults.env);
         assert_eq!(machine.workdir, defaults.workdir);
@@ -186,20 +236,16 @@ mod tests {
     fn optional_flags_remain_independent_in_sdk_config() {
         for gpu in [None, Some(false), Some(true)] {
             for cuda in [None, Some(false), Some(true)] {
-                let config = Config {
-                    resources: Resources {
-                        gpu,
-                        cuda,
-                        gpu_vram: gpu.filter(|enabled| *enabled).map(|_| 1024),
-                        ..Resources::default()
-                    },
-                    ..Config::default()
-                };
-                let machine = machine_config(config, "flags");
-                assert_eq!(machine.resources.gpu, gpu);
-                assert_eq!(machine.resources.cuda, cuda);
+                let converted = resources(&Resources {
+                    gpu,
+                    cuda,
+                    gpu_vram: gpu.filter(|enabled| *enabled).map(|_| 1024),
+                    ..Resources::default()
+                });
+                assert_eq!(converted.gpu, gpu);
+                assert_eq!(converted.cuda, cuda);
                 assert_eq!(
-                    machine.resources.gpu_vram_mib,
+                    converted.gpu_vram_mib,
                     gpu.filter(|enabled| *enabled).map(|_| 1024)
                 );
             }

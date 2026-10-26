@@ -1,7 +1,12 @@
 //! Spacecraft's machine traits, implemented with smolmachines.
 
-use smolmachines::{Machine as SdkMachine, MachineState};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
+use smolmachines::{ExecOptions, Machine as SdkMachine, MachineState};
+
+use spacecraft::image::{Digest, Image};
 use spacecraft::machine::{self, State, Status};
 use spacecraft::{Error, Result};
 
@@ -12,14 +17,18 @@ pub struct Engine;
 
 impl machine::Engine for Engine {
     type Machine = Machine;
+
+    fn image_digest(image: &Image) -> Result<Digest> {
+        crate::image::digest(image)
+    }
 }
 
 /// Spacecraft machine implementation for smolmachines.
 pub struct Machine(SdkMachine);
 
 impl machine::Machine for Machine {
-    fn start(name: &str, config: machine::Config) -> Result<Self> {
-        let machine = SdkMachine::create(machine_config(config, name))
+    fn start(name: &str, record: machine::Record) -> Result<Self> {
+        let machine = SdkMachine::create(machine_config(record, name))
             .map_err(|error| engine_error(&error))?;
 
         match machine.start() {
@@ -44,6 +53,27 @@ impl machine::Machine for Machine {
 
     fn resume(&self) -> Result<()> {
         self.0.resume().map_err(|error| engine_error(&error))
+    }
+
+    fn exec(&self, command: &[String], timeout: Duration) -> Result<i32> {
+        let stream = self
+            .0
+            .exec_stream(command, ExecOptions::new().timeout(timeout))
+            .map_err(|error| engine_error(&error))?;
+        // Taken before the stream moves into `within`'s thread, so the client can still be
+        // killed from here once the time runs out.
+        let kill = stream.kill_handle();
+
+        let Some(result) = within(timeout, move || stream.collect_result()) else {
+            // The engine has not answered in time. Killing its client ends the command in the
+            // guest too, and the SDK reaps the client on a thread of its own.
+            kill.kill();
+            return Err(Error::Engine {
+                message: format!("no answer within {timeout:?}"),
+            });
+        };
+
+        Ok(result.exit_code)
     }
 
     fn stop(self) -> Result<()> {
@@ -91,8 +121,30 @@ fn state(machine_state: MachineState) -> State {
     }
 }
 
+/// Runs `work` on a thread of its own and waits up to `timeout` for its result.
+///
+/// Returns `None` when `timeout` passes before the result arrives. The thread is left to end
+/// on its own, since nothing can stop a thread from outside: the caller ends whatever `work`
+/// waits on, as `exec` kills the engine's client. A `work` that panics returns `None` too, at
+/// once.
+fn within<T: Send + 'static>(
+    timeout: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (sender, receiver) = mpsc::channel();
+
+    thread::spawn(move || {
+        let result = work();
+        // Once `within` has given up, the receiver is gone and the send fails, so a late
+        // result drops here.
+        let _ = sender.send(result);
+    });
+
+    receiver.recv_timeout(timeout).ok()
+}
+
 /// Maps a smolmachines error to a Spacecraft `Error::Engine`.
-fn engine_error(error: &smolmachines::Error) -> Error {
+pub(crate) fn engine_error(error: &smolmachines::Error) -> Error {
     Error::Engine {
         message: error.to_string(),
     }
@@ -126,6 +178,8 @@ fn confirms_absence(name: &str, message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Instant;
 
     #[test]
     fn state_mapping_separates_dead_from_unknown() {
@@ -179,5 +233,28 @@ mod tests {
             let actual = confirms_absence(name, message);
             assert_eq!(actual, expected, "message: {message:?}");
         }
+    }
+
+    #[test]
+    fn within_returns_the_result_in_time() {
+        let actual = within(Duration::from_secs(5), || 7);
+
+        assert_eq!(actual, Some(7));
+    }
+
+    #[test]
+    fn within_gives_up_once_the_timeout_passes() {
+        let started = Instant::now();
+
+        // The work outlives the timeout by far. Its thread keeps sleeping after the test ends,
+        // and the test binary exits without waiting for it.
+        let actual = within(Duration::from_millis(50), || {
+            thread::sleep(Duration::from_secs(10));
+        });
+
+        assert_eq!(actual, None);
+        // A `within` that waited for the work to end would return `None` too, ten seconds
+        // later, so the elapsed time is what shows the deadline.
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

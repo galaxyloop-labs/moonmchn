@@ -2,10 +2,10 @@
 //!
 //! # Three sources of state
 //!
-//! - **Markers, on disk.** One file per machine at `<state dir>/machines/<name>`, holding the
-//!   configuration the machine was booted with, as TOML. A marker records that Spacecraft owns
-//!   a machine under that name. It outlives the daemon, so a restarted daemon finds the
-//!   machines an earlier one booted.
+//! - **Markers, on disk.** One file per machine at `<state dir>/machines/<name>`, holding its
+//!   record as TOML: the configuration the machine was booted with, and the digest its image
+//!   resolved to. A marker records that Spacecraft owns a machine under that name. It outlives
+//!   the daemon, so a restarted daemon finds the machines an earlier one booted.
 //! - **In-flight claims, in memory.** A map from a name to what an operation is doing to that
 //!   machine right now (`Starting` or `Stopping`). It dies with the daemon, so a crash can never
 //!   leave a name stuck as busy.
@@ -22,8 +22,8 @@
 //!   daemon. It is held for a single `get`, `insert` or `remove` at a time, never across an
 //!   `.await`. The only I/O under it is the directory read in `close`.
 //! - The claim, an entry in that map, is what serializes operations on one name. Operations on
-//!   different names run in parallel. `start` and `stop` on a claimed name fail at once with
-//!   `MachineBusy`, and `status` and `list` report the claim's state.
+//!   different names run in parallel. `start`, `stop` and `resolve` on a claimed name fail at
+//!   once with `MachineBusy`, and `status` and `list` report the claim's state.
 //! - `close` decides whether the daemon may shut down. An unforced close with machines running
 //!   changes nothing. Otherwise it closes admission: every later `start` or `stop` fails with
 //!   `DaemonStopping`.
@@ -50,6 +50,15 @@
 //!
 //! Every other error keeps the marker: failing to inspect a machine is no evidence that it is
 //! gone, and the marker is how a later `stop` finds it.
+//!
+//! # Announcements
+//!
+//! `stop` and `stop_all` tell everyone in a machine that it is stopping now, and why, before
+//! they stop it: `broadcast` writes the message to every terminal in the guest through
+//! `Machine::exec`, then hangs up every session, so each one ends with an exit status before
+//! the machine disappears. It is best effort: `Machine::exec` gives up on it after
+//! `ANNOUNCE_TIMEOUT`, its result is dropped, and a machine that cannot hear it stops all the
+//! same. A daemon killed outright announces nothing, so silence means a malfunction.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -61,7 +70,7 @@ use std::time::Duration;
 use tokio::task;
 
 use crate::daemon::api::{MachineStart, MachineStatus, MachineStop};
-use crate::machine::{self, Engine, Machine, State};
+use crate::machine::{self, Engine, GUEST_SHELL, Machine, State};
 use crate::{Error, Result, dirs};
 
 /// The name of the directory where machine data is stored.
@@ -70,10 +79,30 @@ const MACHINE_DIR_NAME: &str = "machines";
 /// The mode in which machine record files are created.
 const MACHINE_RECORD_FILE_MODE: u32 = 0o600;
 
+/// How long a stop waits for its announcement: `Machine::exec` gives up after this long,
+/// whether the engine answered or not.
+const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The script that writes `$1` to every terminal in the guest, as the image's user.
+///
+/// `wall` would read utmp, and musl, Alpine's libc, implements utmp as stubs, so `wall` there
+/// finds nobody; every session Spacecraft opens is a `/dev/pts/N` that `spacecraft` owns, and
+/// `tee` writes to all of them at once. The message travels as `$1`, so nothing is quoted.
+const BROADCAST: &str = r#"printf '%s' "$1" | tee /dev/pts/[0-9]* >/dev/null 2>&1"#;
+
+/// The shell's flag that runs its next argument as a script.
+const SCRIPT_FLAG: &str = "-c";
+
+/// The command that ends every session in the guest before the stop. Run as `spacecraft`, it
+/// sends `SIGHUP` to every process that user owns except the calling shell and init, so each
+/// session's shell exits as if its terminal had closed, and the engine client returns an
+/// ordinary exit status before the machine disappears.
+const HANG_UP: &str = "kill -s HUP -1";
+
 /// The mount source prefixes that the engine fetches as remote volumes. Every other source is
 /// a host directory.
 ///
-/// The list mirrors `Mount::is_remote` in smolmachines 1.20.2 (`src/config.rs`), so the daemon
+/// The list mirrors `Mount::is_remote` in smolmachines 1.29.1 (`src/config.rs`), so the daemon
 /// and the engine agree on which sources are host paths. A scheme that a later smolmachines
 /// adds stays refused until it is added here.
 ///
@@ -182,7 +211,7 @@ impl Machines {
         })
     }
 
-    /// Reports a machine's live state and the configuration it was started with.
+    /// Reports a machine's live state and the record it was started from.
     ///
     /// An in-flight claim wins over the engine: during a boot, `status` reports `Starting` with
     /// no pid, whatever the engine says in the meantime. Otherwise the marker decides whether
@@ -201,14 +230,14 @@ impl Machines {
 
         if let Some(state) = inflight {
             // An operation holds the name. A booting machine has no pid to report yet. The
-            // configuration comes from the marker, which `start` writes right after claiming
-            // the name, so a request arriving in between sees `config: None`.
+            // record comes from the marker, which `start` writes once it has resolved the
+            // image's digest, so a request arriving in between sees `record: None`.
             //
             // This `read_marker` blocks the runtime thread for one small file read; all other
             // file I/O runs on the blocking pool.
             return Ok(MachineStatus {
                 status: status_without_pid(name, state),
-                config: read_marker(&marker)?,
+                record: read_marker(&marker)?,
             });
         }
 
@@ -222,14 +251,21 @@ impl Machines {
             // Both reads must succeed, and their errors propagate unchanged. `attach` only
             // reopens a handle by name, and may succeed for a machine the engine no longer has;
             // the engine's answer to `status` is what counts.
-            let config = read_marker(&marker)?;
+            let record = read_marker(&marker)?;
             let status = E::Machine::attach(&name)?.status()?;
-            Ok(MachineStatus { status, config })
+            Ok(MachineStatus { status, record })
         })
         .await
     }
 
     /// Starts a machine, or reports it already running.
+    ///
+    /// Only a fresh boot resolves the image's digest, through the engine: before the marker
+    /// of a new machine, so a failed resolution leaves nothing behind, and before `destroy`
+    /// for a failed one, so a failed resolution keeps it. A machine that is kept is compared
+    /// with the request without resolving: a moved tag, or an archive rebuilt at the same
+    /// path, counts as the same machine. An invalid image never reaches `start`: the request
+    /// fails to deserialize first.
     ///
     /// - `Started`: booted now, either from scratch or replacing a machine the engine reports
     ///   `Failed`; or resumed, when the engine reports it `Paused` with the same configuration.
@@ -239,8 +275,9 @@ impl Machines {
     ///   relative path; `MachineBusy` when another operation holds the name or the engine
     ///   reports the machine stopping; `MachineConfigMismatch` when it runs, or is paused, with
     ///   a different configuration; `MachineUnknown` when the engine cannot report it;
-    ///   `MachineLeftover` when the boot and the engine's cleanup both failed; filesystem and
-    ///   engine errors otherwise.
+    ///   `ImageResolve` when the engine cannot resolve the image's digest; `MachineLeftover`
+    ///   when the boot and the engine's cleanup both failed; filesystem and engine errors
+    ///   otherwise.
     pub(super) async fn start<E: Engine>(
         &self,
         name: String,
@@ -274,19 +311,22 @@ impl Machines {
             // at the teardown.
             let _lock = lock;
 
-            // `write_marker` fails with `AlreadyExists` when a marker exists: one atomic step
-            // both checks and creates, so nothing can slip in between.
-            match write_marker(&marker, &config) {
-                // A new marker: no machine had this name.
-                Ok(()) => boot::<E>(&name, &marker, config),
-                // A marker exists, so Spacecraft already owns a machine with this name.
-                Err(Error::Io { source, .. }) if source.kind() == ErrorKind::AlreadyExists => {
-                    start_existing::<E>(&name, &marker, config)
-                }
-                // The marker was not created (permissions, a name too long for the
-                // filesystem), so there is nothing to undo.
-                Err(e) => Err(e),
+            // A marker exists, so Spacecraft already owns a machine with this name.
+            if marker_exists(&marker)? {
+                return start_existing::<E>(&name, &marker, config);
             }
+
+            // A new machine. Resolve the image's digest before writing the marker, so a failed
+            // resolution leaves no marker and no machine behind.
+            let digest = E::image_digest(&config.image)?;
+            let record = machine::Record { digest, config };
+
+            // The claim keeps every other operation off the name, so no marker appeared since
+            // the check; `write_marker` still refuses to replace one, as a guard. A failed write
+            // (permissions, a name too long for the filesystem) creates no marker, so there is
+            // nothing to undo.
+            write_marker(&marker, &record)?;
+            boot::<E>(&name, &marker, record)
         })
         .await
     }
@@ -324,9 +364,19 @@ impl Machines {
                 return Ok(MachineStop::NotRunning);
             }
 
+            let machine = E::Machine::attach(&name)?;
+            // Tell everyone in the machine before it goes. Best effort: the result is dropped,
+            // `exec` gives up after `ANNOUNCE_TIMEOUT`, and a failed announcement never blocks
+            // or fails the stop.
+            // ponytail: silent, so add a daemon log line when a failed announcement bites.
+            let _ = machine.exec(
+                &broadcast(&name, &format!("spacecraft machine stop {name}")),
+                ANNOUNCE_TIMEOUT,
+            );
+
             // A stopped machine loses its marker, and so does one the engine confirms gone:
             // that marker was stale, and the answer is as if there had been none.
-            if destroy(E::Machine::attach(&name)?, &marker)? {
+            if destroy(machine, &marker)? {
                 Ok(MachineStop::Stopped)
             } else {
                 Ok(MachineStop::NotRunning)
@@ -480,7 +530,13 @@ impl Machines {
                 move || -> Result<()> {
                     // Named so the clone lives until the closure ends, as in `start`.
                     let _lock = lock;
-                    destroy(E::Machine::attach(&name)?, &marker)?;
+                    let machine = E::Machine::attach(&name)?;
+                    // Announced as in `stop`, with the daemon's reason.
+                    let _ = machine.exec(
+                        &broadcast(&name, "the spacecraft daemon is stopping"),
+                        ANNOUNCE_TIMEOUT,
+                    );
+                    destroy(machine, &marker)?;
                     Ok(())
                 }
             });
@@ -510,6 +566,40 @@ impl Machines {
         }
 
         Ok(outcomes)
+    }
+
+    /// Resolves a machine's name: succeeds once a marker shows that Spacecraft owns the machine
+    /// and no operation holds the name.
+    ///
+    /// `resolve` consults claims and markers only, so a machine the engine cannot report still
+    /// resolves, and the session that follows meets the engine's error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidMachineName`] when the name is invalid; [`Error::MachineBusy`]
+    /// with the claim's state while a start or a stop holds the name; [`Error::MachineNotFound`]
+    /// when no marker exists; [`Error::Io`] when the marker cannot be checked.
+    pub(super) fn resolve(&self, name: String) -> Result<()> {
+        // Validate the name and build the marker path. An invalid name stops here, before it
+        // touches the map or the filesystem.
+        let marker = machine_marker(&self.dir, &name)?;
+
+        // Copy the claim's state out of the map in a statement of its own, so the lock is free
+        // again before any I/O below.
+        let inflight = claims(&self.inflight).names.get(&name).copied();
+
+        if let Some(state) = inflight {
+            return Err(Error::MachineBusy { name, state });
+        }
+
+        // One `try_exists` on the runtime thread, like `status`'s read of a marker in flight.
+        // Nothing awaits since the claim check, so no other request can claim the name in
+        // between.
+        if !marker_exists(&marker)? {
+            return Err(Error::MachineNotFound { name });
+        }
+
+        Ok(())
     }
 
     /// Returns the names that have a marker, in no particular order.
@@ -574,7 +664,7 @@ impl Machines {
     }
 }
 
-/// Boots `name` from `config`, under a marker that `start` wrote for this boot.
+/// Boots `name` from `record`, under a marker that `start` wrote for this boot.
 ///
 /// A failed boot rolls that marker back, so a failed start leaves nothing behind. By the
 /// contract of `Machine::start`, any boot error means the engine left no machine behind,
@@ -585,8 +675,8 @@ impl Machines {
 ///
 /// Once the machine is up, a failure to ask for its status returns with the marker kept: the
 /// machine exists, so its record must stay.
-fn boot<E: Engine>(name: &str, marker: &Path, config: machine::Config) -> Result<MachineStart> {
-    let machine = E::Machine::start(name, config).inspect_err(|e| {
+fn boot<E: Engine>(name: &str, marker: &Path, record: machine::Record) -> Result<MachineStart> {
+    let machine = E::Machine::start(name, record).inspect_err(|e| {
         if !matches!(e, Error::MachineLeftover { .. }) {
             let _ = remove_marker(marker);
         }
@@ -621,13 +711,16 @@ fn start_existing<E: Engine>(
             name: name.to_string(),
             state: status.state,
         }),
-        // The engine reports the machine dead: stopped, errored or deleted. Delete it, record
-        // the new configuration, and boot fresh. From the new marker on, the boot's rollback
-        // may remove it.
+        // The engine reports the machine dead: stopped, errored or deleted. Resolve the image's
+        // digest first, so a failed resolution keeps the dead machine and its marker as they
+        // are. Then delete it, write the new record, and boot fresh. From the new marker on,
+        // the boot's rollback may remove it.
         State::Failed => {
+            let digest = E::image_digest(&config.image)?;
+            let record = machine::Record { digest, config };
             destroy(machine, marker)?;
-            write_marker(marker, &config)?;
-            boot::<E>(name, marker, config)
+            write_marker(marker, &record)?;
+            boot::<E>(name, marker, record)
         }
         // The engine gave no usable answer. Acting on it could destroy a healthy machine, so
         // refuse and leave the choice to the user: retry, or `stop` to discard the machine.
@@ -639,9 +732,13 @@ fn start_existing<E: Engine>(
 
 /// Keeps a machine that is running, starting or paused, when it was started with `config`.
 ///
+/// Only the configuration is compared, so no digest is resolved: a moved tag, or an archive
+/// rebuilt at the same path, counts as the same machine, and a different image as a different
+/// configuration.
+///
 /// A different configuration needs a fresh boot, which would discard the machine, and a
 /// paused machine's saved execution with it, so a paused machine follows the same rule as a
-/// running one. A marker without a configuration (`None`) counts as different. The user
+/// running one. A marker without a record (`None`) counts as different. The user
 /// resolves a mismatch with `stop`, then `start`: `stop` is the explicit way to discard a
 /// machine, saved execution included.
 ///
@@ -656,7 +753,7 @@ fn reuse<M: Machine>(
     marker: &Path,
     config: &machine::Config,
 ) -> Result<MachineStart> {
-    if read_marker(marker)?.as_ref() != Some(config) {
+    if read_marker(marker)?.map(|record| record.config).as_ref() != Some(config) {
         return Err(Error::MachineConfigMismatch {
             name: name.to_string(),
         });
@@ -694,20 +791,21 @@ fn status_without_pid(name: String, state: State) -> machine::Status {
     }
 }
 
-/// Writes a machine record file with the given configuration.
+/// Writes `record` to a machine record file.
 ///
-/// - Serializes first, so a configuration that cannot be serialized creates no file.
+/// - Serializes first, so a record that cannot be serialized creates no file.
 /// - Writes a temporary file next to `path`, then moves it into place without replacing
 ///   anything: the move fails with `AlreadyExists` when `path` exists, even as a symbolic
-///   link, and `start` relies on this error to detect an existing machine. A write that fails
-///   partway leaves nothing behind, because the temporary file is removed when it is dropped.
+///   link. `start` checks for a marker under its claim before it writes one, so this refusal
+///   is a guard, and its error is like any other. A write that fails partway leaves nothing
+///   behind, because the temporary file is removed when it is dropped.
 /// - Creates the file with mode `0o600` (`MACHINE_RECORD_FILE_MODE`): readable and writable by
 ///   its owner only, like the private directory it sits in.
 /// - Nothing calls `sync_all`, so a power loss shortly after a write can leave the marker
 ///   empty or missing. A crash of the daemon alone cannot, because the kernel already holds
 ///   the data.
-fn write_marker(path: &Path, config: &machine::Config) -> Result<()> {
-    let contents = config.to_toml()?;
+fn write_marker(path: &Path, record: &machine::Record) -> Result<()> {
+    let contents = record.to_toml()?;
     // `path` is `<dir>/<name>`, so the temporary file lands in the markers directory, on the
     // same filesystem as its final name.
     let dir = path
@@ -726,18 +824,18 @@ fn write_marker(path: &Path, config: &machine::Config) -> Result<()> {
     Ok(())
 }
 
-/// Reads a machine record file and returns the configuration.
+/// Reads a machine record file and returns the record.
 /// Otherwise returns `Ok(None)` if the file does not exist or is empty.
 ///
 /// - A missing file reads as `None`, so a marker removed between a caller's existence check
 ///   and this read causes no error.
-/// - An empty file reads as `None` too, checked before parsing: `Config` fills missing fields
-///   with defaults, so parsing an empty file would yield a default configuration, as if the
-///   machine had been booted with one.
+/// - An empty file reads as `None` too, checked before parsing, which would fail on the
+///   missing fields. A power loss can leave a marker empty (see `write_marker`); its machine
+///   then still reports its state, with no record.
 /// - A file that does not parse is an error (`ConfigDeserialization`), so a corrupt record is
-///   never mistaken for a missing one. `Config` denies unknown fields, so a marker written by
+///   never mistaken for a missing one. `Record` denies unknown fields, so a marker written by
 ///   a Spacecraft version with more fields fails to parse here as well.
-fn read_marker(path: &Path) -> Result<Option<machine::Config>> {
+fn read_marker(path: &Path) -> Result<Option<machine::Record>> {
     let contents = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
@@ -749,13 +847,13 @@ fn read_marker(path: &Path) -> Result<Option<machine::Config>> {
         return Ok(None);
     }
 
-    let config: machine::Config =
+    let record: machine::Record =
         toml::from_str(&contents).map_err(|e| Error::ConfigDeserialization {
             path: path.to_path_buf(),
             source: e,
         })?;
 
-    Ok(Some(config))
+    Ok(Some(record))
 }
 
 /// Removes a machine record file.
@@ -796,6 +894,24 @@ fn marker_exists(path: &Path) -> Result<bool> {
 fn machine_marker(dir: &Path, name: &str) -> Result<PathBuf> {
     validate_name(name)?;
     Ok(dir.join(name))
+}
+
+/// The command that tells everyone in machine `name` that it is stopping now, and why, then
+/// ends their sessions. Lines end in CR LF, so a terminal in raw mode renders them.
+fn broadcast(name: &str, reason: &str) -> Vec<String> {
+    let message = format!(
+        "\r\nBroadcast message from spacecraft:\r\n\r\n\
+             Machine {name} is stopping now: {reason}.\r\n\r\n"
+    );
+
+    vec![
+        GUEST_SHELL.into(),
+        SCRIPT_FLAG.into(),
+        format!("{BROADCAST}; {HANG_UP}"),
+        // The script's name, `$0`, then the message, `$1`.
+        GUEST_SHELL.into(),
+        message,
+    ]
 }
 
 /// Validates a machine name.
@@ -886,16 +1002,25 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     use super::*;
+    use crate::config::Resources;
     use crate::daemon::instance;
+    use crate::image::{Digest, Image};
 
     #[test]
     fn write_marker_refuses_to_clobber_and_leaves_no_temporary_file() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("alpha");
-        let config = machine::Config::default();
-        write_marker(&marker, &config).unwrap();
+        let record = machine::Record {
+            digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            config: machine::Config {
+                image: Image::parse("ghcr.io/org/name:latest").unwrap(),
+                mounts: Vec::new(),
+                resources: Resources::default(),
+            },
+        };
+        write_marker(&marker, &record).unwrap();
 
-        let again = write_marker(&marker, &config);
+        let again = write_marker(&marker, &record);
 
         assert!(matches!(
             again,
@@ -903,7 +1028,7 @@ mod tests {
         ));
         assert_eq!(
             fs::read_to_string(&marker).unwrap(),
-            config.to_toml().unwrap()
+            record.to_toml().unwrap()
         );
         assert_eq!(fs::metadata(&marker).unwrap().mode() & 0o7777, 0o600);
         // The refused write's temporary file is gone: the marker is the directory's one entry.
@@ -979,5 +1104,22 @@ mod tests {
             machines.claim("a", State::Starting),
             Err(Error::DaemonStopping)
         ));
+    }
+
+    #[test]
+    fn broadcast_is_sh_with_the_message_as_its_argument() {
+        let command = broadcast("alpha", "spacecraft machine stop alpha");
+
+        // The message is `sh`'s `$1`, so the script needs no quoting of it.
+        assert_eq!(
+            command,
+            [
+                "sh",
+                "-c",
+                r#"printf '%s' "$1" | tee /dev/pts/[0-9]* >/dev/null 2>&1; kill -s HUP -1"#,
+                "sh",
+                "\r\nBroadcast message from spacecraft:\r\n\r\nMachine alpha is stopping now: spacecraft machine stop alpha.\r\n\r\n",
+            ]
+        );
     }
 }

@@ -1,23 +1,62 @@
 use spacecraft::daemon::api::Status;
 use spacecraft::daemon::client::Client;
 use spacecraft::daemon::{Mode, serve_in};
-use spacecraft::machine::{self, Config, Engine, Machine, State};
+use spacecraft::image::{Digest, Image};
+use spacecraft::machine::{self, Engine, Machine, Record, State};
 use spacecraft::{Error, Result};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+/// Every command `exec` ran, with the machine's name, across the tests of one binary. They run
+/// in parallel, so a test that reads it uses a machine name no other test uses.
+static EXECS: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(Vec::new());
 
 pub struct FakeEngine;
 
 impl Engine for FakeEngine {
     type Machine = FakeMachine;
+
+    fn image_digest(image: &Image) -> Result<Digest> {
+        match image.as_str() {
+            "ghcr.io/org/unresolvable:latest" => Err(Error::ImageResolve {
+                image: image.to_string(),
+                message: "the fake registry has no such image".to_string(),
+            }),
+            _ => Digest::parse(&format!("sha256:{}", "f".repeat(64))),
+        }
+    }
 }
+
+/// Asserts that `exec` ran exactly one command in the machine `name`, and that its message, the
+/// last argument, names `reason`.
+///
+/// The command's script and the message's wording are the daemon's unit test's to check: an
+/// integration test checks only what the daemon decides, whether it announced and why.
+#[allow(dead_code)]
+pub fn assert_announced(name: &str, reason: &str) {
+    // Collected first, so the lock is free again before an assertion can fail: a panic while
+    // holding it would poison it for every other test in the binary.
+    let commands: Vec<Vec<String>> = EXECS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(machine, _)| machine == name)
+        .map(|(_, command)| command.clone())
+        .collect();
+
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    let message = commands[0].last().unwrap();
+    assert!(message.contains(reason), "{message:?}");
+}
+
 pub struct FakeMachine {
     name: String,
 }
 
 impl Machine for FakeMachine {
-    fn start(name: &str, _config: Config) -> Result<Self> {
+    fn start(name: &str, _record: Record) -> Result<Self> {
         match name {
             "hung" => hang(),
             "boom" => Err(engine("boom")),
@@ -61,6 +100,18 @@ impl Machine for FakeMachine {
 
     fn resume(&self) -> Result<()> {
         Ok(())
+    }
+
+    fn exec(&self, command: &[String], _timeout: Duration) -> Result<i32> {
+        if self.name.as_str() == "mute" {
+            Err(engine("mute"))
+        } else {
+            EXECS
+                .lock()
+                .unwrap()
+                .push((self.name.clone(), command.to_vec()));
+            Ok(0)
+        }
     }
 
     fn stop(self) -> Result<()> {
