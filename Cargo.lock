@@ -322,7 +322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -974,7 +974,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1152,7 +1152,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1324,9 +1324,9 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "smol-cloud"
-version = "1.29.1"
+version = "1.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5442ce7d0d7118811ded9dd596c79fd6f258d2eafc55eabdb286ceeffc4ed51"
+checksum = "18eb55cb0b9c79b1050445f1b4c0b8786799200f48a7d527f01eb20dc7acea7b"
 dependencies = [
  "base64 0.22.1",
  "reqwest",
@@ -1337,9 +1337,9 @@ dependencies = [
 
 [[package]]
 name = "smolmachines"
-version = "1.29.1"
+version = "1.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd827d0375fe7efc5fe1132e8f466cb6b96f5d9771b6ecb1772cfe395b27e2b5"
+checksum = "68c44476e9dc7a5b6205c10ba8e6c5e51601dc3d0957746c5606c2afdaff7c4e"
 dependencies = [
  "flate2",
  "futures-util",
@@ -1500,7 +1500,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

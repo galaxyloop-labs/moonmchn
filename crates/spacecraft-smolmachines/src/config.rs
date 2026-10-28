@@ -73,6 +73,9 @@ pub fn resources(resources: &Resources) -> smolmachines::Resources {
         // --cuda during local machine creation. Upgrade or fix the SDK's
         // argument mapping before relying on this flag to enable CUDA.
         cuda: resources.cuda,
+        // Both keep the SDK defaults until the egress work turns on virtio-net.
+        network_backend: None,
+        disk_durability: None,
     }
 }
 
@@ -168,6 +171,8 @@ mod tests {
                 gpu: Some(false),
                 gpu_vram_mib: Some(2048),
                 cuda: Some(false),
+                network_backend: None,
+                disk_durability: None,
             }
         );
     }

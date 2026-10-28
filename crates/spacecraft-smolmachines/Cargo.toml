@@ -9,7 +9,7 @@ readme.workspace = true
 
 [dependencies]
 spacecraft = { version = "0.1.0", path = "../spacecraft" }
-smolmachines = "1.29.1"
+smolmachines = "1.32.2"
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "blocking",
