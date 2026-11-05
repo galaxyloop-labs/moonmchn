@@ -1,11 +1,18 @@
 //! The private, per-user state directory that holds the daemon's files.
 
+use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, Metadata};
+use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
+use crate::daemon::egress::EGRESS_DIR_NAME;
+use crate::daemon::machines::MACHINE_DIR_NAME;
 use crate::dirs::{self, PRIVATE_DIRECTORY_MODE};
 use crate::{Error, Result};
+
+/// The directories the daemon keeps in its state directory, which `prepare_in` creates.
+const LAYOUT: [&str; 2] = [MACHINE_DIR_NAME, EGRESS_DIR_NAME];
 
 /// The permission bits of a mode, without the file type.
 const PERMISSION_BITS: u32 = 0o7777;
@@ -16,7 +23,8 @@ const STICKY_BIT: u32 = 0o1000;
 /// The user id of root.
 const ROOT_UID: u32 = 0;
 
-/// Creates or reuses the private state directory `leaf` and returns its resolved path.
+/// Creates or reuses the private state directory `leaf`, lays out the daemon's directories in
+/// it, and returns its resolved path.
 ///
 /// `leaf` is the directory Spacecraft owns, such as `~/.local/state/spacecraft` or
 /// `$SPACECRAFT_HOME` as given; every directory above it is an ancestor. Missing
@@ -24,14 +32,13 @@ const ROOT_UID: u32 = 0;
 /// ancestor must belong to root or `uid` and must not be writable by other users,
 /// unless it is a root-owned sticky directory such as `/tmp`. `leaf` must be a real
 /// directory owned by `uid` with mode `0700`: a missing one is created that way, an
-/// existing one is never repaired.
+/// existing one is never repaired. Every name in `LAYOUT` follows, inside it: a missing
+/// directory gets mode `0700`, and an existing one keeps its permissions.
+///
+/// This is the one function that creates directories in the state directory, and the daemon
+/// calls it when it starts, before anything else touches the directory.
 pub(super) fn prepare_in(leaf: &Path, uid: u32) -> Result<PathBuf> {
-    let (Some(parent), Some(name)) = (leaf.parent(), leaf.file_name()) else {
-        return Err(unsafe_directory(
-            leaf,
-            "the filesystem root is not a private directory",
-        ));
-    };
+    let (parent, name) = split(leaf)?;
     // Private, so a umask such as 002 cannot leave a new ancestor group-writable.
     DirBuilder::new()
         .recursive(true)
@@ -39,6 +46,50 @@ pub(super) fn prepare_in(leaf: &Path, uid: u32) -> Result<PathBuf> {
         .create(parent)
         .map_err(|source| Error::io(parent, source))?;
 
+    let leaf = trusted_parent(parent, uid)?.join(name);
+    // An existing leaf is not proof of safety, so it is validated either way.
+    dirs::create_private_directory(&leaf)?;
+    validate_private(&lstat(&leaf)?, &leaf, uid)?;
+
+    for directory in LAYOUT {
+        dirs::create_private_directory(&leaf.join(directory))?;
+    }
+
+    Ok(leaf)
+}
+
+/// Checks the private state directory `leaf`, creating nothing, and returns its path.
+///
+/// A missing `leaf` comes back as given: no daemon has run there, and only the daemon creates
+/// it, through `prepare_in`. Anything at that path, a dangling symlink included, passes the
+/// checks `prepare_in` runs, the ancestors and then the leaf, and comes back resolved.
+pub(super) fn locate_in(leaf: &Path, uid: u32) -> Result<PathBuf> {
+    match fs::symlink_metadata(leaf) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(leaf.to_path_buf()),
+        Err(source) => return Err(Error::io(leaf, source)),
+    }
+
+    let (parent, name) = split(leaf)?;
+    let leaf = trusted_parent(parent, uid)?.join(name);
+    validate_private(&lstat(&leaf)?, &leaf, uid)?;
+    Ok(leaf)
+}
+
+/// Splits `leaf` into its parent and its name. The filesystem root has neither, and is no
+/// private directory.
+fn split(leaf: &Path) -> Result<(&Path, &OsStr)> {
+    match (leaf.parent(), leaf.file_name()) {
+        (Some(parent), Some(name)) => Ok((parent, name)),
+        _ => Err(unsafe_directory(
+            leaf,
+            "the filesystem root is not a private directory",
+        )),
+    }
+}
+
+/// Resolves `parent`, which exists, and checks every ancestor on the resolved path.
+fn trusted_parent(parent: &Path, uid: u32) -> Result<PathBuf> {
     // Allow system ancestor links such as macOS's /var -> /private/var, but
     // leave the final component untouched so a symlinked leaf is rejected.
     let parent = fs::canonicalize(parent).map_err(|source| Error::io(parent, source))?;
@@ -47,12 +98,7 @@ pub(super) fn prepare_in(leaf: &Path, uid: u32) -> Result<PathBuf> {
     for ancestor in parent.ancestors() {
         validate_ancestor(&lstat(ancestor)?, ancestor, uid)?;
     }
-
-    let leaf = parent.join(name);
-    // An existing leaf is not proof of safety, so it is validated either way.
-    dirs::create_private_directory(&leaf)?;
-    validate_private(&lstat(&leaf)?, &leaf, uid)?;
-    Ok(leaf)
+    Ok(parent)
 }
 
 /// Reads metadata without following a final symlink.
@@ -137,11 +183,15 @@ mod tests {
 
     use rustix::process::geteuid;
 
-    use super::{prepare_in, validate_private};
+    use super::{locate_in, prepare_in, validate_private};
     use crate::{Error, Result};
 
     fn prepare(leaf: &Path) -> Result<PathBuf> {
         prepare_in(leaf, geteuid().as_raw())
+    }
+
+    fn locate(leaf: &Path) -> Result<PathBuf> {
+        locate_in(leaf, geteuid().as_raw())
     }
 
     /// Prepares `leaf` and checks that its resolved path comes back.
@@ -172,6 +222,52 @@ mod tests {
 
         assert_eq!(prepare_at(&leaf), directory);
         assert_eq!(fs::read_to_string(directory.join("keep")).unwrap(), "keep");
+    }
+
+    #[test]
+    fn lays_out_the_daemon_directories() {
+        let root = tempfile::tempdir().unwrap();
+
+        let directory = prepare_at(&root.path().join("spacecraft"));
+
+        for name in ["machines", "egress"] {
+            assert_eq!(mode(&directory.join(name)), 0o700, "{name}");
+        }
+
+        // An existing directory keeps its permissions, as the leaf does.
+        let leaf = root.path().join("other");
+        fs::create_dir(&leaf).unwrap();
+        fs::set_permissions(&leaf, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(leaf.join("machines")).unwrap();
+        fs::set_permissions(leaf.join("machines"), fs::Permissions::from_mode(0o750)).unwrap();
+
+        prepare_at(&leaf);
+
+        assert_eq!(mode(&leaf.join("machines")), 0o750);
+    }
+
+    #[test]
+    fn locate_creates_nothing_for_a_missing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = root.path().join(".local/state/spacecraft");
+
+        assert_eq!(locate(&leaf).unwrap(), leaf);
+        assert!(!root.path().join(".local").exists());
+    }
+
+    #[test]
+    fn locate_checks_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = root.path().join("spacecraft");
+        fs::create_dir(&leaf).unwrap();
+        fs::set_permissions(&leaf, fs::Permissions::from_mode(0o750)).unwrap();
+
+        assert!(matches!(locate(&leaf), Err(Error::UnsafeDirectory { .. })));
+        assert_eq!(mode(&leaf), 0o750);
+
+        // A directory the daemon prepared comes back resolved, as `prepare_in` returns it.
+        let prepared = prepare_at(&root.path().join("prepared"));
+        assert_eq!(locate(&root.path().join("prepared")).unwrap(), prepared);
     }
 
     #[test]

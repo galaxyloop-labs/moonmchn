@@ -31,7 +31,7 @@ spacecraft daemon status                                 # prints the daemon's p
 spacecraft daemon stop [--force]                         # stops the daemon; --force also stops every machine
 spacecraft machine start <name> [--image <ref|archive>]  # boots a machine from config.toml and an image
 spacecraft machine stop <name>                           # stops a machine and discards its disks
-spacecraft machine status [-e] <name>                    # prints its state; -e adds its record
+spacecraft machine status [-e] <name>                    # prints its state; -e adds its spec
 spacecraft machine list                                  # prints one line per machine
 spacecraft machine exec [--no-tty] <name> -- <command>…  # runs a command in a machine
 spacecraft machine shell <name>                          # opens a login shell in a machine
@@ -89,26 +89,27 @@ spacecraft-smolmachines = { path = "../spacecraft/crates/spacecraft-smolmachines
 ```
 
 Convert at the backend boundary, after loading or selecting your configuration. A
-machine's record holds that configuration's settings, the image to boot and the
-digest the engine resolves it to:
+machine's spec holds that configuration's settings and the image to boot, pinned to
+the digest the engine resolves it to:
 
 ```rust
-use spacecraft::image::{DEFAULT_IMAGE, Image};
+use spacecraft::image::Image;
 use spacecraft::machine::{self, Engine as _};
 
-let spacecraft::Config { mounts, resources } = config;
-let image = Image::resolve(DEFAULT_IMAGE)?;
+let spacecraft::Config { mounts, resources, egress } = config;
+let image = Image::default();
 let digest = spacecraft_smolmachines::Engine::image_digest(&image)?;
-let record = machine::Record {
-    digest,
-    config: machine::Config {
-        image,
-        mounts,
-        resources,
+let spec = machine::Spec {
+    image: machine::ImageSpec {
+        name: image,
+        digest: Some(digest),
     },
+    mounts,
+    resources,
+    egress,
 };
 let machine_config =
-    spacecraft_smolmachines::machine_config(record, "my-unique-machine");
+    spacecraft_smolmachines::machine_config(spec, "my-unique-machine");
 // Pass machine_config to smolmachines::Machine::create when ready to launch.
 ```
 

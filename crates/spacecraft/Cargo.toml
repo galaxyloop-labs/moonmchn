@@ -8,6 +8,7 @@ license.workspace = true
 readme.workspace = true
 
 [dependencies]
+idna = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
@@ -17,7 +18,9 @@ thiserror = "2"
 
 [target.'cfg(unix)'.dependencies]
 close_fds = "0.3.2"
+getrandom = "0.4"
 rustix = { version = "1", features = ["net", "process", "stdio"] }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 tokio = { version = "1", features = [
   "rt",
   "net",
@@ -27,6 +30,10 @@ tokio = { version = "1", features = [
   "signal",
   "time",
 ] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# Paused time, so a test of the decider's 5 s deadline passes at once.
+tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

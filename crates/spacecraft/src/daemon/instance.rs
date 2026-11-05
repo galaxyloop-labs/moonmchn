@@ -38,6 +38,26 @@ pub(super) fn lock(dir: &Path) -> Result<File> {
     }
 }
 
+/// Returns whether a daemon holds the lock on `daemon.pid` in `dir`, creating nothing.
+///
+/// The file opens for reading, without `create`, so a missing file, or a missing `dir`, means
+/// that no daemon runs there. A free lock is taken and dropped at once, as `lock` would take
+/// it: a start racing that exact instant could see it held.
+pub(super) fn lock_held(dir: &Path) -> Result<bool> {
+    let path = dir.join(LOCK_FILE_NAME);
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(Error::io(&path, err)),
+    };
+
+    match file.try_lock() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(err)) => Err(Error::io(&path, err)),
+    }
+}
+
 /// Claims `dir` for this daemon: takes the lock on `daemon.pid`, writes this process's pid into
 /// the file, and removes a socket a dead daemon left behind.
 ///
@@ -127,6 +147,20 @@ mod tests {
         drop(file);
 
         let _ = super::lock(lock_dir.path()).unwrap();
+    }
+
+    #[test]
+    fn lock_held_reports_the_lock_without_creating_its_file() {
+        let lock_dir = tempfile::tempdir().unwrap();
+
+        assert!(!super::lock_held(lock_dir.path()).unwrap());
+        assert!(!lock_dir.path().join("daemon.pid").exists());
+
+        let file = super::lock(lock_dir.path()).unwrap();
+        assert!(super::lock_held(lock_dir.path()).unwrap());
+
+        drop(file);
+        assert!(!super::lock_held(lock_dir.path()).unwrap());
     }
 
     #[test]

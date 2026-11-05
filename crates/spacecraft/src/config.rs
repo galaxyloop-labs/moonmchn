@@ -10,7 +10,8 @@ use crate::{Error, Result};
 
 mod accelerators;
 mod byte_size;
-mod egress_interceptor;
+mod egress;
+mod egress_endpoint;
 mod host_cpus;
 mod host_memory;
 mod mount;
@@ -20,7 +21,8 @@ mod resources;
 use accelerators::Accelerators;
 pub use byte_size::ByteSize;
 use byte_size::Mib;
-pub use egress_interceptor::EgressInterceptor;
+pub use egress::{Egress, Pattern, Subject};
+pub use egress_endpoint::EgressEndpoint;
 use host_cpus::HostCPUs;
 use host_memory::HostMemory;
 pub use mount::Mount;
@@ -29,9 +31,10 @@ pub use resources::Resources;
 
 /// Configuration
 ///
-/// Optional settings are omitted from TOML when unset, leaving backend defaults.
-/// [`Self::default`] leaves settings unset; [`Self::recommended`] sizes
-/// resources for the current host.
+/// Optional settings are omitted from TOML when unset, leaving backend defaults; `mounts` and
+/// the `[egress]` table, both lists included, are always written. [`Self::default`] leaves
+/// settings unset and allows no host; [`Self::recommended`] sizes resources for the current host
+/// and allows every host.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -39,6 +42,9 @@ pub struct Config {
     pub mounts: Vec<Mount>,
     /// VM sizing and optional devices.
     pub resources: Resources,
+    /// The hosts a machine's guest may reach, and those it may never reach. A file without
+    /// `[egress]` allows nothing.
+    pub egress: Egress,
 }
 
 impl Config {
@@ -52,7 +58,9 @@ impl Config {
     /// GPU graphics and NVIDIA CUDA support are detected separately
     /// on supported platforms; unavailable or failed probes leave them disabled.
     ///
-    /// No mounts are configured, this is leaved to the user.
+    /// No mounts are configured; that is left to the user.
+    ///
+    /// Every host is allowed: `[egress]` holds `allow = ["*"]` and `deny = []`.
     ///
     /// GPU shared memory is capped at 4096 MiB, one eighth of host RAM, and
     /// half of reported dedicated VRAM, rounded down to 256 MiB blocks
@@ -117,6 +125,10 @@ impl Config {
                 cuda: Some(accelerators.cuda),
                 ..Resources::default()
             },
+            // ponytail: every host until the approver lands. Without prompts, an empty `allow`
+            // denies every flow; with them, `setup` can write `Egress::default()` and ask about
+            // every flow (sandboxing spec, Sequencing step 3).
+            egress: Egress::unrestricted(),
             ..Self::default()
         })
     }
@@ -134,7 +146,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        Accelerators, Config, EgressInterceptor, HostCPUs, HostMemory, Mib, Mount, Port, Resources,
+        Accelerators, Config, Egress, HostCPUs, HostMemory, Mib, Mount, Pattern, Resources,
     };
     use crate::ByteSize;
     use crate::Error;
@@ -187,10 +199,15 @@ mod tests {
         .unwrap();
         let contents = config.to_toml().unwrap();
 
-        // Only `mounts` and `resources` at the top level, unset settings omitted.
+        // `mounts`, `resources` and `egress` at the top level, unset settings omitted, and every
+        // host allowed: what `setup` writes.
         assert_eq!(
             contents,
-            "mounts = []\n\n[resources]\ncpus = 4\nmemory = 4096\ngpu = false\ncuda = false\n"
+            concat!(
+                "mounts = []\n\n",
+                "[resources]\ncpus = 4\nmemory = 4096\ngpu = false\ncuda = false\n\n",
+                "[egress]\nallow = [\"*\"]\ndeny = []\n",
+            )
         );
         assert_eq!(toml::from_str::<Config>(&contents).unwrap(), config);
     }
@@ -260,13 +277,14 @@ mod tests {
                 gpu_vram: Some(2048),
                 cuda: Some(false),
             },
-        }
-    }
-
-    fn egress_interceptor() -> EgressInterceptor {
-        EgressInterceptor {
-            address: "127.0.0.1:9000".parse().unwrap(),
-            token: "0123456789abcdef".repeat(4),
+            egress: Egress {
+                allow: vec![
+                    Pattern::parse("api.github.com").unwrap(),
+                    Pattern::parse("*.pypi.org").unwrap(),
+                    Pattern::parse("10.0.0.5").unwrap(),
+                ],
+                deny: vec![Pattern::parse("upload.pypi.org").unwrap()],
+            },
         }
     }
 
@@ -292,6 +310,14 @@ overlay = 10
 gpu = false
 gpu_vram = 2048
 cuda = false
+
+[egress]
+allow = [
+    "api.github.com",
+    "*.pypi.org",
+    "10.0.0.5",
+]
+deny = ["upload.pypi.org"]
 "#;
 
     #[test]
@@ -308,30 +334,19 @@ cuda = false
     }
 
     #[test]
-    fn ports_and_interceptors_round_trip() {
-        let port = Port {
-            host: 8080,
-            guest: 80,
-        };
-        let contents = toml::to_string(&port).unwrap();
-        assert_eq!(toml::from_str::<Port>(&contents).unwrap(), port);
-
-        let interceptor = egress_interceptor();
-        let contents = toml::to_string(&interceptor).unwrap();
-        assert!(contents.contains(&interceptor.token));
-        assert_eq!(
-            toml::from_str::<EgressInterceptor>(&contents).unwrap(),
-            interceptor
-        );
-    }
-
-    #[test]
     fn omitted_settings_leave_backend_choices_unset() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config, Config::default());
         assert!(config.mounts.is_empty());
         assert_eq!(config.resources, Resources::default());
-        assert_eq!(config.to_toml().unwrap(), "mounts = []\n\n[resources]\n");
+
+        // A file without `[egress]` allows nothing, and the table is written out all the same.
+        let contents = config.to_toml().unwrap();
+        assert_eq!(
+            contents,
+            "mounts = []\n\n[resources]\n\n[egress]\nallow = []\ndeny = []\n"
+        );
+        assert_eq!(toml::from_str::<Config>(&contents).unwrap(), config);
     }
 
     #[test]
@@ -360,14 +375,6 @@ cuda = false
         ] {
             assert!(toml::from_str::<Config>(contents).is_err());
         }
-    }
-
-    #[test]
-    fn debug_output_redacts_interceptor_token() {
-        let interceptor = egress_interceptor();
-        let debug = format!("{interceptor:?}");
-        assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains(&interceptor.token));
     }
 
     #[test]
@@ -402,5 +409,22 @@ cuda = false
             error,
             Error::ConfigDeserialization { path: failed, .. } if failed == path
         ));
+    }
+
+    #[test]
+    fn a_bad_pattern_fails_to_load_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[egress]\nallow = [\"foo bar\"]\n").unwrap();
+
+        let error = Config::load_from(&path).unwrap_err();
+
+        assert!(matches!(error, Error::ConfigDeserialization { .. }));
+        // The pattern is named by the TOML error underneath, the way the CLI prints the chain.
+        let chain = format!("{error}: {}", std::error::Error::source(&error).unwrap());
+        assert!(
+            chain.contains(r#"invalid egress pattern "foo bar""#),
+            "{chain}"
+        );
     }
 }

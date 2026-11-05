@@ -13,7 +13,7 @@ and `machine`, which names `spacecraft_smolmachines::session` to open `exec` and
 The adapter also resolves image digests, behind `Engine::image_digest`.
 
 `Config` stays in `spacecraft::config`; `Resources`, `Mount`, `Port`, and
-`EgressInterceptor` are implemented in separate modules and remain available
+`EgressEndpoint` are implemented in separate modules and remain available
 under their existing `spacecraft::config::*` paths. `spacecraft::Config` is also
 still re-exported at the crate root.
 
@@ -59,8 +59,9 @@ directory, and `XDG_STATE_HOME` the state directory, independently.
 - **Memory:** one quarter of total host RAM, bounded to 512–8192 MiB. This uses
   total capacity, not fluctuating free memory; check headroom before running
   several machines or running on a very small host.
-- **Networking:** enabled, with unrestricted outbound access. No inbound ports
-  are published.
+- **Networking:** enabled, with outbound access to every host, from `[egress]`'s
+  `allow = ["*"]` and `deny = []` (see [Configuration format](#configuration-format)
+  and [Egress](#egress)). No inbound ports are published.
 - **GPU graphics:** enabled when macOS on Apple Silicon reports Metal support,
   or Linux has an accessible DRM render device in `/dev/dri`.
 - **CUDA:** detected separately on Linux using `nvidia-smi`; enabled when a device
@@ -114,8 +115,8 @@ spacecraft setup --force
 
 ## Configuration format
 
-Spacecraft owns the `mounts` and `resources` configuration schema. The unique
-machine name is supplied per machine rather than stored in global defaults.
+Spacecraft owns the `mounts`, `resources` and `egress` configuration schema. The
+unique machine name is supplied per machine rather than stored in global defaults.
 Mounts use an array of tables. Optional resource fields can be omitted to leave
 that choice to the backend. `memory` and `gpu_vram` use MiB; `storage` and
 `overlay` use GiB. For example, an 8-CPU host with 16 GiB RAM and no detected
@@ -130,6 +131,10 @@ memory = 4096
 network = true
 gpu = false
 cuda = false
+
+[egress]
+allow = ["*"]
+deny = []
 ```
 
 To configure mounts, replace the top-level `mounts = []` with `[[mounts]]`
@@ -139,6 +144,50 @@ starting with `s3://`, `gs://`, `r2://` or `rclone://` denotes a remote volume.
 Every other source is a host directory and must be an absolute path:
 `machine start` rejects a relative one, because the engine would resolve it
 against the daemon's working directory, wherever `daemon start` ran.
+
+`[egress]` decides which hosts a machine's guest may reach (see [Egress](#egress)),
+with two lists of patterns, `allow` and `deny`. A pattern is one of:
+
+- an exact hostname, such as `api.github.com`;
+- `*.` and a domain, for one or more labels under it: `*.pypi.org` matches
+  `files.pypi.org` and `a.b.pypi.org`, never `pypi.org` itself;
+- a `*` label elsewhere, for exactly one non-empty label: `jenkins.*.ci.example.com`;
+- `*` alone, for any host;
+- an IP literal, such as `10.0.0.5` or `2001:db8::5`, which matches that destination
+  address exactly.
+
+A hostname is trimmed, stripped of one trailing dot and normalized to lowercase ASCII
+by IDNA (Internationalized Domain Names in Applications), so `Bücher.example.` reads as
+`xn--bcher-kva.example`. Each label then holds `a`–`z`, `0`–`9` and `-`, or is exactly
+`*`. A `*` inside a label, a `*.` followed by nothing or by another `*`, an empty
+pattern or label, and a `host:port` entry fail to load, naming the pattern and the rule.
+
+- A missing `allow`, or `allow = []`, allows nothing: every flow is denied and logged.
+- `allow = ["*"]` allows every host but the built-in denies and the host itself,
+  whatever else it lists.
+- No entry opens the host itself: a loopback or unspecified address, the guest's own
+  link and the host's own addresses are denied whatever `allow` lists (see
+  [Egress](#egress)).
+- `deny` takes the same patterns but a bare `*`, which fails to load, since allowing
+  nothing is an empty `allow`'s job. A missing `deny`, or `deny = []`, denies nothing
+  beyond the built-ins.
+- A hostname matches only a flow that names its server in a TLS hello (see
+  [Egress](#egress)). Plain HTTP names none, so `allow = ["example.com"]` admits
+  `https://example.com` and turns away `http://example.com`.
+- A `deny` entry beats every allow, a bare `*` included.
+- A hostname in `deny` turns away every flow that carries no name, such as plain HTTP,
+  SSH or a database connection, unless an IP literal in `allow` lists its address.
+
+For example, this lets a machine reach the GitHub API, PyPI's hosts but its upload
+host, and `10.0.0.5`, and nothing else:
+
+```toml
+[egress]
+allow = ["api.github.com", "*.pypi.org", "10.0.0.5"]
+deny = ["upload.pypi.org"]
+```
+
+`setup` writes `allow = ["*"]` and `deny = []`.
 
 `Config::default()` leaves settings unset; `Config::recommended()` selects the
 host-aware setup defaults. Deserialization rejects unknown keys to catch typos.
@@ -159,38 +208,52 @@ machine SDK are confined to their respective crates.
 `spacecraft::machine` is the extension point for engines, and the core crate never
 names a machine SDK:
 
-- `Engine` names a backend's machine type (`type Machine: Machine`) and resolves
-  images: `image_digest(image)` returns the digest of the content an image names,
-  which the machine about to boot then runs pinned.
-- `Machine` carries the behavior: `start(name, record)` creates and boots a
-  machine from its `Record`, the configuration plus that digest; `attach(name)`
-  reopens a handle by name; `status()` reports a `Status` (name, `State`, optional
-  pid); `resume()` resumes a paused machine's saved execution; `exec(command,
-  timeout)` runs a command in the guest as the image's user, with no input and its
-  output discarded, and returns its exit status, giving up once `timeout` passes;
-  and `stop(self)` destroys the machine with its disks.
+- `Engine` names a backend's machine type (`type Machine: Machine`) and its network
+  gateway's (`type Gateway: Gateway`), and resolves images: `image_digest(image)`
+  returns the digest of the content an image names, which the machine about to boot
+  then runs pinned.
+- `Machine` carries the behavior: `start(name, spec, egress)` creates and boots a
+  machine from its `Spec`, what `machine start` asked for, its image pinned to
+  that digest, with its network routed through the daemon's egress decider: `egress`,
+  an `EgressEndpoint`, holds the decider's loopback address and the machine's token,
+  64 hex digits its gateway presents with every flow; `attach(name)` reopens a handle
+  by name; `status()` reports a `Status` (name, `State`, optional pid); `resume()`
+  resumes a paused machine's saved execution; `exec(command, timeout)` runs a command in the guest as the image's
+  user, with no input and its output discarded, and returns its exit status, giving
+  up once `timeout` passes; and `stop(self)` destroys the machine with its disks.
+- `Gateway` decodes the request the engine's gateway writes to the decider before
+  each flow: `decode_flow(bytes)` answers `Decoded::Partial(len)` while the request
+  needs more bytes, `Decoded::Complete(flow)` with the `Flow`'s token, destination and
+  opening bytes, or its `FlowError`; `ALLOW` and `DENY` are the reply bytes;
+  `is_guest_link(ip)` names the guest's own link; and `is_host_address(ip)` names the
+  host's own addresses. It does no I/O, save the system call `is_host_address` may
+  make, one that sends nothing and never blocks, such as binding a socket.
 - `daemon::serve::<E>(out)` runs the daemon with engine `E`. The CLI chooses the
   engine by type: `serve::<spacecraft_smolmachines::Engine>(out)`.
 
-A backend implements both traits and passes its engine type to the daemon:
+A backend implements the three traits and passes its engine type to the daemon:
 
 ```rust
+use std::net::IpAddr;
 use std::time::Duration;
 
+use spacecraft::config::EgressEndpoint;
 use spacecraft::image::{Digest, Image};
-use spacecraft::machine::{Engine, Machine, Record, Status};
+use spacecraft::machine::{Decoded, Engine, Gateway, Machine, Spec, Status};
 
 struct MyEngine;
 struct MyMachine;
+struct MyGateway;
 
 impl Engine for MyEngine {
     type Machine = MyMachine;
+    type Gateway = MyGateway;
 
     fn image_digest(image: &Image) -> spacecraft::Result<Digest> { todo!() }
 }
 
 impl Machine for MyMachine {
-    fn start(name: &str, record: Record) -> spacecraft::Result<Self> { todo!() }
+    fn start(name: &str, spec: Spec, egress: &EgressEndpoint) -> spacecraft::Result<Self> { todo!() }
     fn attach(name: &str) -> spacecraft::Result<Self> { todo!() }
     fn status(&self) -> spacecraft::Result<Status> { todo!() }
     fn resume(&self) -> spacecraft::Result<()> { todo!() }
@@ -198,11 +261,23 @@ impl Machine for MyMachine {
     fn stop(self) -> spacecraft::Result<()> { todo!() }
 }
 
+impl Gateway for MyGateway {
+    type FlowError = String;
+
+    const ALLOW: u8 = 0;
+    const DENY: u8 = 1;
+
+    fn decode_flow(bytes: &[u8]) -> Result<Decoded, String> { todo!() }
+    fn is_guest_link(ip: IpAddr) -> bool { todo!() }
+    fn is_host_address(ip: IpAddr) -> bool { todo!() }
+}
+
 spacecraft::daemon::serve::<MyEngine>(&mut std::io::stdout())?;
 ```
 
 The daemon calls `image_digest` and every `Machine` method on a blocking thread,
-one handle per request, so implementations may block.
+one handle per request, so implementations may block. It calls `Gateway`'s
+functions from its decider, which owns the connection and its deadline.
 
 `machine exec` and `machine shell` first send the daemon a `machine_resolve` request,
 which succeeds once the daemon owns the machine and no start or stop holds it. The
@@ -214,13 +289,19 @@ on this host.
 `spacecraft_smolmachines::Engine` and `spacecraft_smolmachines::Machine` implement
 those traits with the SDK; the adapter's `Machine` wraps an SDK machine handle.
 
-`spacecraft_smolmachines::machine_config(record, name)` replaces
-`config.into_machine_config(name)`; it boots the record's image pinned to its
-digest, with networking on. `spacecraft_smolmachines::session(name, command, tty)`
+`spacecraft_smolmachines::machine_config(spec, name)` replaces
+`config.into_machine_config(name)`; it boots the spec's image pinned to its
+digest, with networking on, on virtio-net. The adapter's `start` creates the machine
+through the SDK, then starts it through the engine's own
+`machine start --name <name> --egress-interceptor 127.0.0.1:<port> --mediated-egress`,
+with the token in the engine's environment, `SMOLVM_INTERCEPTOR_TOKEN`, and nowhere in
+its arguments: SDK 1.32.2 cannot pass that flag (smol-machines/smol#314). Its
+`Gateway` decodes the engine's request, the preamble (see [Egress](#egress)).
+`spacecraft_smolmachines::session(name, command, tty)`
 returns the engine client's command line for an `exec` or `shell` session,
 which the CLI runs in place of itself. The adapter also exposes
 `resources(&resources)`, `mount(mount)`, `port(port)`, and
-`egress_interceptor(interceptor)` in place of the previous SDK `From`
+`egress_endpoint(endpoint)` in place of the previous SDK `From`
 implementations. These are functions because both configuration and SDK types
 are foreign to the adapter crate under Rust's orphan rules.
 
@@ -271,12 +352,15 @@ since the daemon stops every machine before it exits.
 The daemon keeps its files in the state directory (see
 [Directories](#directories)), `~/.local/state/spacecraft` by default.
 
-Missing directories on that path are created with mode `0700`. Every directory
-above it must belong to root or to you, and only its owner may write to it, with
-root-owned sticky directories such as `/tmp` as the one exception; symlinks among
-them, such as macOS's `/var`, are resolved. The state directory itself must be a
-real directory, not a symlink, owned by you with mode `0700`. Spacecraft never
-changes existing permissions.
+The daemon creates the state directory when it starts, with its missing parents,
+`machines/` and `egress/`, each with mode `0700`. No other command creates
+anything there: a missing state directory means that no daemon runs. Every
+directory above it must belong to root or to you, and only its owner may write to
+it, with root-owned sticky directories such as `/tmp` as the one exception;
+symlinks among them, such as macOS's `/var`, are resolved. The state directory
+itself must be a real directory, not a symlink, owned by you with mode `0700`.
+These checks hold for the daemon and for every command that finds the directory.
+Spacecraft never changes existing permissions.
 
 | Entry | Mode | Purpose |
 |---|---|---|
@@ -284,11 +368,30 @@ changes existing permissions.
 | `daemon.pid` | `0600` | locked for as long as the daemon runs, and for as long as an operation it abandoned at the teardown still runs; holds its pid for humans |
 | `daemon.log` | `0600` | appended to; receives the daemon's output after startup |
 | `machines/` | `0700` | one record per machine; see [Records](#records) |
+| `egress/` | `0700` | holds `port` |
+| `egress/port` | `0600` | the port on `127.0.0.1` where the daemon listens for egress decisions; see below |
 
 The lock on `daemon.pid` decides whether a daemon is running. Files left behind by
 a daemon that crashed need no cleanup: the next `start` takes the lock and replaces
-them. Machine records are the exception: they stay, and the next daemon reports on
-them.
+them. Machine records and `egress/port` are the exceptions: they stay, and the next
+daemon reads them.
+
+A machine can outlive the daemon that started it: a daemon killed outright or
+crashed leaves its machines running, and so does one whose stop of a machine fails
+or runs out of time (see [Stopping](#stopping)). The machine's network gateway
+keeps the port and the token it booted with, and every flow it makes is denied
+until a daemon answers on that port again. The daemon holds every token in memory
+alone, so the records are the only copy that survives it: each daemon reloads the
+tokens from the records when it starts, then keeps them current, adding a
+machine's token when it writes the record and dropping it when it removes the
+record.
+
+The first daemon listens on a free port and writes it to `egress/port`, and every
+later one listens on that port again. While any record exists, a daemon that
+cannot, because another process holds the port, refuses to start until the port is
+free: `daemon start` fails with
+`failed to listen for egress decisions on 127.0.0.1:<port>`. With no record, no
+machine depends on the port, so the daemon moves to a free one and writes it down.
 
 Unix socket paths are limited to 104 bytes on macOS and 108 on Linux.
 `~/.local/state/spacecraft/daemon.sock` takes about 50 bytes for a typical home,
@@ -304,9 +407,9 @@ closes.
 | `{"status":{}}` | `{"done":{"pid":1234,"version":"0.1.0"}}` |
 | `{"shutdown":{"force":false}}` | `{"done":null}`, then the daemon exits; or the refusal below |
 | `{"shutdown":{"force":true}}` | `{"done":null}`, then the daemon stops every machine and exits |
-| `{"machine_start":{"name":"x","config":{…}}}` | `{"done":{"started":{"name":"x","state":"running","pid":4242}}}`, or `already_running` in place of `started` |
+| `{"machine_start":{"name":"x","spec":{…,"egress":{"allow":["*"],"deny":[]}}}}` | `{"done":{"started":{"name":"x","state":"running","pid":4242}}}`, or `already_running` in place of `started` |
 | `{"machine_stop":{"name":"x"}}` | `{"done":"stopped"}` or `{"done":"not_running"}` |
-| `{"machine_status":{"name":"x"}}` | `{"done":{"status":{"name":"x","state":"running","pid":4242},"record":{"digest":"sha256:…","config":{…}}}}` |
+| `{"machine_status":{"name":"x"}}` | `{"done":{"status":{"name":"x","state":"running","pid":4242},"marker":{"image":{"name":"…","digest":"sha256:…"},…}}}`: `marker` holds the spec from the machine's marker, never its token |
 | `{"machine_list":{}}` | `{"done":[{"name":"x","state":"running","pid":4242}]}` |
 | `{"machine_resolve":{"name":"x"}}` | `{"done":null}`, or `{"error":{"message":"machine x not found"}}`, or `machine x is starting` |
 | any other line | `{"error":{"message":"invalid request: …"}}` |
@@ -314,8 +417,8 @@ closes.
 `{"shutdown":{}}` means `"force":false`. A request that fails gets
 `{"error":{"message":"…"}}` with the message the CLI prints after `error: `, such as
 `` {"error":{"message":"1 running machine(s); pass `--force` to stop them"}} ``.
-`machine_start` carries the configuration from `config.toml`, so a request may hold
-up to 64 KiB.
+`machine_start` carries the machine's spec, built from `config.toml`, so a request
+may hold up to 64 KiB.
 
 `nc -U` works as a client:
 
@@ -354,6 +457,124 @@ An unforced `daemon stop` only gets past the refusal with no machines, so
 that fails to stop keeps its record, so a later `machine stop` can retry; the daemon
 exits anyway.
 
+### Egress
+
+Every machine's network goes through its engine's gateway, a userspace network stack
+on the host and the guest's only way out. Before it dials anything, the gateway asks
+the daemon's egress decider about every TCP flow the guest opens, and it dials the
+destination itself only when the decider allows the flow; a denied flow is reset in the
+guest. The engine pulls a machine's image on the host before the guest boots, so a
+registry needs no entry in `allow`.
+
+The decider listens on `127.0.0.1`, at the port in `egress/port` (see
+[State directory](#state-directory)). For each flow the gateway opens one connection,
+writes a request, the preamble, and reads one byte back: `0` to allow, `1` to deny.
+Under smolmachines the preamble is, big-endian:
+
+| Field | Bytes |
+|---|---|
+| magic `SMOLMEG2` | 8 |
+| the machine's token | 32 |
+| machine id, new on every start | 16 |
+| parent id, zero for a root machine | 16 |
+| address family, `4` or `6` | 1 |
+| destination port | 2 |
+| destination address | 4 or 16 |
+| length of the opening bytes, then the bytes | 2 + at most 8192 |
+
+The opening bytes are what the guest sent first: the gateway holds a flow for up to
+100 ms to collect one whole TLS record or a complete HTTP request head.
+
+A flow claims a name with a TLS `ClientHello`, whose SNI (Server Name Indication) names
+the server it asks for, however many records carry the hello. Any other opening bytes
+claim nothing, plain HTTP included: the gateway asks once per connection, and one
+connection can carry many requests, each naming its own host in its `Host` header, so
+no request's host can stand for the connection.
+
+The guest writes the claim, and the gateway dials the address whatever the claim says.
+So a claimed name counts only when the host's own resolver maps it to the dialed
+address; one that resolves elsewhere, or not at all, leaves the flow without a name, and
+a name written as an IP address never counts. A lookup gets 5 seconds, and at most 32
+run at once, for every machine together: a claim past either is judged without its name.
+
+A flow has two subjects: its destination address, always, and its name, when the name
+counts. The address counts in its canonical form, so `::ffff:127.0.0.1` is `127.0.0.1`.
+In order:
+
+1. A loopback or unspecified destination, one on the guest's own link, or one of the
+   host's own addresses is denied, whatever `allow` lists: the host would dial it as
+   itself. Under smolmachines the guest's link is
+   `100.96.0.0/30`, and on a host with working IPv6 also `fd53:4d00::/64`, the gateway's
+   `100.96.0.1` and `fd53:4d00::1` included; the host's own addresses are every address
+   the host can bind, its LAN and VPN addresses among them. A bind that fails for
+   another reason than a missing address counts the address as the host's. The check
+   binds on every flow, about 10 µs on macOS, and sends nothing, so an address the host
+   gains while the daemon runs, from DHCP, a VPN or a new bridge, counts from its first
+   flow: a list taken when the daemon starts would miss that address and admit its
+   flows.
+2. A built-in deny denies the flow: every link-local address, `169.254.0.0/16`, which
+   holds the cloud metadata address `169.254.169.254`, and `fe80::/10`. So does a
+   `deny` entry equal to the address or matching the name.
+3. A flow with a name is allowed when an `allow` entry matches the name, or an IP
+   literal in `allow` equals its address; a bare `*` matches every name.
+4. A flow without a name is allowed by an IP literal in `allow` equal to its address, or
+   by a bare `*` while `deny` holds no hostname: a name withheld identifies nothing, so
+   a hostname deny holds only if such flows are not waved through.
+5. Any other flow is denied.
+
+No list opens the host itself, by design. Its services often trust whatever connects
+from the host, and the gateway connects from the host. An IP entry can also come to name
+the host: DHCP may hand the host an address that `allow` lists for another machine, and
+whoever writes or approves a list cannot tell which addresses will be the host's. Under
+smolmachines the engine refuses the host's loopback on its own too, so the gateway's
+`100.96.0.1` stays closed whatever the decider answers.
+
+The lists are the ones in the machine's spec, which `machine start` took from
+`config.toml`; a running machine keeps them until `machine stop` (see
+[Lifecycle](#lifecycle)).
+
+Each machine has a token of its own, 32 random bytes drawn when it boots, kept in hex in
+its record (see [Records](#records)) and in the daemon's memory, and handed to the engine
+at start. The gateway presents it with every flow, so the decider knows whose lists to
+apply. Every failure denies: a preamble cut short, malformed or not complete within 5
+seconds, a token no machine has. The engine fails closed too: with no decider on the
+port, every flow is reset.
+
+Each machine has a point-to-point link of its own, under smolmachines `100.96.0.2/30`,
+with the gateway at `100.96.0.1`, the same in every machine. Nothing reaches another
+machine or the host, and no port is published. Any other address that `allow` admits is
+dialed from the host, by the host's routing table, a LAN or VPN address included.
+
+Spacecraft trusts the users of its host: one user per host, a private state directory,
+and a hostile local user out of scope. The decider's port is where that line shows. The
+engine requires the decider on the host's loopback, so while no daemon holds the port,
+any local process can bind it. The window is a daemon killed outright with machines
+running: a process on the port then receives their tokens and may allow every flow. The
+tokens buy nothing beyond that verdict, and the next `daemon start` refuses to run while
+the port is held, which is how a takeover shows.
+
+The decider writes one line per event to the daemon's log, each starting `egress: `:
+
+| Line | When |
+|---|---|
+| `egress: denied a to https://httpbin.org (16.58.42.220:443): no list allows it` | a denied flow whose name counts |
+| `egress: denied a to 104.20.23.154:80: no name to check against deny` | a denied flow without a name |
+| `egress: api.github.com does not resolve to 192.0.2.1` | a claimed name dropped, before the flow is judged without it |
+| `egress: denied 127.0.0.1:51941: bad preamble, short read` | a request the decider cannot read, once per peer address |
+| `egress: denied 192.0.2.1:443: unknown token` | a token no machine has, once per destination address |
+| `egress: accept failed: <error>`, `egress: listener failed: <error>` | the listener's own errors |
+| `egress: 37 lines dropped: the log fell behind` | lines that came faster than the daemon wrote them: past 1024 waiting, each new one overwrites the oldest |
+
+- A deny's reason is one of `loopback`, `guest link`, `host address`, `built-in deny`,
+  `listed in deny`, `no name to check against deny` and `no list allows it`.
+- A flow whose name counts is named by the URL the guest asked for, `https://<name>`,
+  whose path travels encrypted, then by its address.
+- A dropped name may also read `did not resolve within 5 s`, or
+  `was not looked up: too many lookups running`.
+- A bad preamble reads `short read`, `wrong magic`, `unknown address family <n>`,
+  `opening bytes length <n> over 8192`, or an I/O error.
+- An allowed flow leaves no line, and no line carries a token.
+
 ## Machines
 
 `spacecraft machine` runs on Linux and macOS and needs a running daemon; it never
@@ -373,13 +594,14 @@ starts one.
 | `machine shell x` | a login shell as `spacecraft`, in `/home/spacecraft` | the shell's |
 | `machine status x`, `machine exec x` or `machine shell x` for an unknown name | `error: machine x not found` | 1 |
 | `machine start Alpha` | `error: invalid machine name "Alpha": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit` | 1 |
+| `machine start x`, with a bad pattern in `[egress]`, such as `allow = ["foo bar"]` or `deny = ["*"]` | `error: failed to parse …/config.toml as TOML: …`, naming the pattern and its rule: `invalid egress pattern "foo bar": labels contain letters, digits and '-', and cannot be empty` | 1 |
 | `machine start x`, with a relative mount source such as `./data` | `error: invalid mount source "./data": a host directory must be an absolute path` | 1 |
 | `machine start x --image alpine`, a reference without its registry host | `error: invalid image "alpine": a registry reference must start with its registry host` | 1 |
 | `machine start x --image -` | `error: invalid image "-": an image on stdin is not supported; pass the archive's path` | 1 |
 | `machine start x --image ./rootfs/`, a directory | `error: invalid image "./rootfs/": a local image must be a docker save archive file` | 1 |
 | `machine start x --image ghcr.io/org/private:tag`, a private image | `error: failed to resolve image ghcr.io/org/private:tag: 403 Forbidden from https://ghcr.io/token: …`; see [Images](#images) | 1 |
 | `machine start x`, for a record the engine cannot report | ``error: the engine cannot report machine x; retry, or run `spacecraft machine stop x` to discard it`` | 1 |
-| `machine start x`, running or paused with a different configuration or image | ``error: machine x is running with a different configuration; run `spacecraft machine stop x` to discard it, then start it again`` | 1 |
+| `machine start x`, running or paused with a different configuration, `[egress]` included, or image | ``error: machine x is running with a different configuration; run `spacecraft machine stop x` to discard it, then start it again`` | 1 |
 | `machine start`, `stop`, `exec` or `shell` on `x` while another client starts or stops `x` | `error: machine x is starting`, or `stopping` | 1 |
 | `machine exec x` without `--` and a command | clap's usage error | 2 |
 | `machine exec` or `machine shell`, when the machine stops during the session | the announcement, then the session ends; see [Lifecycle](#lifecycle) | 129 |
@@ -391,23 +613,26 @@ starts one.
 Errors go to stderr. ` (pid N)` appears wherever the engine reports a pid.
 
 `machine status --extended x` (`-e`) prints the name and state, a blank line, then
-the machine's record, as TOML: the digest its image resolved to, then the
-configuration it was started with (see [Records](#records)):
+the machine's spec, as TOML: what it was started with, its image pinned to the
+digest it resolved to (see [Images](#images) and [Records](#records)):
 
 ```
 Name:   alpha
 State:  running (pid 4242)
 
-digest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-
-[config]
-image = "ghcr.io/galaxyloop-labs/spacecraft-images:default"
 mounts = []
 
-[config.resources]
+[image]
+name = "ghcr.io/galaxyloop-labs/spacecraft-images:default"
+digest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+
+[resources]
 cpus = 4
 memory = 4096
-network = true
+
+[egress]
+allow = ["*"]
+deny = []
 ```
 
 The TOML part is left out when there is no record yet, for example during the
@@ -419,7 +644,7 @@ one configuration; the name and `--image` are the only per-machine inputs.
 
 ### Images
 
-`machine start x` boots `DEFAULT_IMAGE`,
+`machine start x` boots `Image::default()`,
 `ghcr.io/galaxyloop-labs/spacecraft-images:default`, unless `--image` names another
 in one of two forms:
 
@@ -431,13 +656,21 @@ in one of two forms:
   ends in `.tar`, `.tar.gz` or `.tgz`. The CLI makes it absolute against its own
   working directory before sending it, since the daemon runs elsewhere.
 
-When a new machine boots, the daemon resolves its image to a digest, `sha256:` and
-64 hex digits, and records both: a registry tag by asking the registry for the
-digest it points at, an archive by the image id its `manifest.json` names. The engine then
-boots the image pinned to that digest, `host/path@sha256:…` for a registry image,
-so the machine runs exactly what was recorded even if the tag moves meanwhile. A
-machine that exists is never resolved again: `machine start` on it compares
-configurations only, so it needs no network and treats a moved tag as the same
+When a new machine boots, the daemon pins its image: it resolves the image to a
+digest, `sha256:` and 64 hex digits, and writes it into the spec's `[image]`, beside
+the `name` as given: a registry tag by asking the registry for the digest it points
+at, an archive by the image id its `manifest.json` names. The engine then boots the
+image pinned to that digest, `host/path@sha256:…` for a registry image, so the
+machine runs exactly what was recorded even if the tag moves meanwhile.
+
+A spec that already carries a `digest` boots that content or fails: a registry image
+is pulled by that digest, with no request to resolve it, and an archive whose image
+id differs, or a reference that names another digest, is refused before anything is
+written: `image <image> holds sha256:…, but the spec pins sha256:…`.
+
+A machine that exists is never resolved again: `machine start` on it compares its
+spec with the request, every field but the digest, which counts only when the
+request names one. So it needs no network and treats a moved tag as the same
 machine. `machine stop` then `machine start` boots the tag's new content.
 
 The daemon asks registries anonymously, over `https`. A private image fails to
@@ -483,7 +716,16 @@ machine with the same configuration changes nothing and reports `already running
 so it is safe to repeat. With a different configuration it refuses: applying it
 needs a fresh boot, which would destroy the running machine. The engine may report
 a machine paused, although Spacecraft never pauses one: `machine start` resumes it
-under the same configuration rule and reports `started`.
+under the same configuration rule and reports `started`, where the engine can resume
+it. Under smolmachines it cannot, for a machine started with mediated egress, which
+every machine is: `machine start` reports the engine's refusal,
+`mediated egress: this machine requires an external interceptor on every start`, and
+`machine stop` discards the machine.
+
+Every machine gets its egress token when it boots: the daemon draws it, writes it into
+the record before the engine starts the machine, and answers for it from then on (see
+[Egress](#egress)). A boot that fails removes the record, and `machine stop` removes it
+once the machine is gone; either way the daemon stops answering for the token.
 
 The daemon runs one operation per name at a time. A concurrent `machine start` or
 `machine stop` on a name being started or stopped fails at once; it never waits.
@@ -515,10 +757,9 @@ a failure is ignored, and it never blocks the stop.
 ### Records
 
 The daemon keeps one record per machine, `machines/<name>` in the state directory,
-holding what the machine was booted from, as TOML: first `digest`, the digest its
-image resolved to, then the `[config]` table, the configuration it was started
-with, the image as given included. `machine status --extended` prints it, as in
-the block above. A record:
+holding the machine's spec as TOML: what `machine start` asked for, the image as
+given included, with the digest it resolved to beside it (see [Images](#images)).
+`machine status --extended` prints that spec, as in the block above. A record:
 
 - is written before the boot, so its modification time is the start time;
 - is removed only once the engine confirms the machine is gone: `machine stop`
@@ -532,13 +773,21 @@ the block above. A record:
 - is enough to boot the same content again: `--image <repository>@<digest>` for a
   registry image, and the same archive file, kept unchanged, for a local one.
 
+In the file, the spec sits under `[spec]`, below an `[egress]` table holding `token`,
+64 hex digits that the machine's network gateway presents to the daemon's egress
+decider. The token is random, drawn by the daemon when the machine boots and kept
+for its life; a new daemon reloads it from the record (see
+[State directory](#state-directory)). `machine status`, `--extended` included,
+never shows it: the daemon replies with the spec alone, so the token never reaches
+the CLI. The daemon never logs it either.
+
 Machine names use lowercase letters, digits, `_`, `.` and `-`, and start with a
 letter or digit. Records are file names, and macOS volumes are case-insensitive by
 default, so `alpha` and `Alpha` would share one record.
 
 ### Engine
 
-The daemon drives machines through smolmachines 1.29.1. Unless a compatible `smolvm`
+The daemon drives machines through smolmachines 1.32.2. Unless a compatible `smolvm`
 is installed, on `PATH` or as `~/.local/bin/smolvm` or `~/.smolvm/smolvm`, the SDK
 downloads its pinned, checksum-verified engine (about 37 MiB) on the first
 `machine start`, into its cache: `$SMOLMACHINES_CACHE_DIR`, else
@@ -553,8 +802,9 @@ the SDK's `engine_cli()`, in the CLI's own environment: `SMOLVM` when set, else 
 compatible `smolvm` on `PATH`, else the pinned engine. Both run as `spacecraft` in
 `/home/spacecraft`.
 
-Every machine boots its image pinned to its recorded digest, with networking on:
-the engine refuses a registry image on a machine without networking.
+Every machine boots its image pinned to its recorded digest, with networking on, on
+virtio-net, and its flows judged by the decider (see [Egress](#egress)): the engine
+refuses a registry image on a machine without networking.
 `resources.network` is still not forwarded: the adapter turns networking on for
 every machine and ignores the key, so `status --extended` can show
 `network = false` for a guest that has networking.
@@ -567,7 +817,7 @@ example.
 
 Any image a machine boots must provide the following. The image is yours: built and
 published outside this repository, for `linux/arm64` and `linux/amd64`, and named by
-`--image`, or the official one `DEFAULT_IMAGE` names.
+`--image`, or the official one, `Image::default()`.
 
 - A user `spacecraft` (uid 1000, home `/home/spacecraft`, shell `/bin/sh`), no
   password, no `sudo`, no `doas`, no privileged groups.
@@ -581,9 +831,13 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
 
 ### Not implemented yet
 
-- An `image` key in `config.toml`: every machine boots `DEFAULT_IMAGE` or the
+- An `image` key in `config.toml`: every machine boots `Image::default()` or the
   `--image` given.
 - `machine restart`: run `machine stop x && machine start x`.
+- Asking the user about a flow no list allows: it is denied.
+- TLS interception, which would let the decider read an HTTPS request's path: a deny
+  line names an HTTPS flow by its host, and the lists cannot tell one path from
+  another.
 
 ## Known limitations
 
@@ -608,11 +862,53 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
   refuses an archive over 8 GiB.
 - An archive's digest records what ran; booting the same content again needs the
   archive kept.
-- The first start of a machine pulls its image through the guest's network.
+- The first start of a machine pulls its image, which the engine does on the host
+  before the guest's network exists (see [Egress](#egress)).
 - A record written before images, without `digest` and `image`, fails to parse:
   `machine status` fails on it, and `machine exec` and `machine shell` fail at the
   engine, until `machine stop` removes it and `machine start` boots afresh.
 - The announcement adds up to 5 seconds to every stop.
+- The egress lists judge TCP flows alone: DNS resolves freely, and every other UDP
+  datagram is denied.
+- A daemon killed outright leaves its machines running with every flow denied, until
+  the next `daemon start` reloads their tokens. That daemon refuses to start while
+  another process holds its port and a machine depends on it.
+- A claimed name that does not resolve to the dialed address is dropped, and the flow
+  is judged without a name: a guest whose resolver disagrees with the host's, through
+  its hosts file for example, loses its names.
+- A flow without a name needs an IP literal in `allow`, unless `allow` holds a bare `*`
+  and `deny` no hostname: under `allow = ["*"]`, one hostname in `deny` turns away plain
+  HTTP, SSH and every other protocol that sends no TLS hello first.
+- The 32 lookups that may run at once serve every machine, so one guest's stuck
+  lookups turn away the names of all until they end.
+- Plain HTTP carries no name, since one connection can carry requests for many hosts:
+  a hostname in `allow` never admits an `http://` URL, so a package manager on
+  `http://` mirrors, as apt is by default on Debian, needs `https://` ones, or their
+  addresses in `allow`.
+- Inside TLS the decider sees the SNI alone: an HTTPS path is out of its reach, and so
+  is each request's `Host`. A server that allows domain fronting routes by that `Host`,
+  and serves another of its hosts over an allowed name's connection. Every TLS flow is
+  logged as `https://`, IMAPS and the like included.
+- An IP literal matches one address exactly; CIDR ranges are not supported.
+- No guest reaches a service on the host, whatever `allow` lists: one bound to `0.0.0.0`
+  is denied on every address the host holds, and one bound to loopback alone on the
+  gateway's address. A service a guest needs runs in the guest.
+- A denied flow connects first on the guest's side: the gateway answers the guest's
+  handshake before it asks the decider, so the deny arrives as a reset, and a client
+  that sends nothing, such as `nc` reading `/dev/null`, can exit 0.
+- Under smolmachines 1.32.2, an allowed flow's reply is lost once the guest closes its
+  sending side, as `nc` does when its input ends.
+- Under smolmachines on Linux with nonlocal binding turned on,
+  `net.ipv4.ip_nonlocal_bind` or `net.ipv6.ip_nonlocal_bind` set to `1`, every address
+  of that family binds, so every flow to one is denied as `host address`, whatever
+  `allow` lists.
+- Under smolmachines, only the network goes through the decider: the engine's VMM
+  (virtual machine monitor) runs unconfined on the host.
+- Under smolmachines, the engine cannot pause a machine created from an archive, nor
+  one with a GPU, whose Vulkan state its checkpoint cannot capture; and it cannot
+  resume a paused machine started with mediated egress. `machine start` on one
+  reports the engine's refusal, and `machine stop`, then `machine start`, is the way
+  out.
 - A home on a network filesystem may not support the daemon's socket and lock, or
   the engine's cache. Point `SPACECRAFT_HOME` and `SMOLMACHINES_CACHE_DIR` at a
   local disk.

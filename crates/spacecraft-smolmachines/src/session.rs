@@ -24,13 +24,13 @@ const GUEST_HOME: &str = "/home/spacecraft";
 const LOGIN_FLAG: &str = "-l";
 
 /// The engine client's command group for machines.
-const MACHINE: &str = "machine";
+pub(crate) const MACHINE: &str = "machine";
 
 /// The `machine` subcommand that runs a command in a machine.
 const EXEC: &str = "exec";
 
-/// Names the machine the command runs in.
-const NAME_FLAG: &str = "--name";
+/// Names the machine a `machine` subcommand acts on.
+pub(crate) const NAME_FLAG: &str = "--name";
 
 /// Sets the user the command runs as, joined to its value in one argument.
 const USER_FLAG: &str = "--user=";

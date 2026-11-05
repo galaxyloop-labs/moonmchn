@@ -74,24 +74,22 @@ pub(super) fn launch(mut command: Command, dir: &Path, timeout: Duration) -> Res
 ///
 /// Most likely the child lost a race to another daemon: the lock says whether one is alive,
 /// the socket whether it accepts connections. Nobody holding the lock means the child really
-/// failed, and its exit status and stderr say how.
+/// failed, and its exit status and stderr say how. The lock check creates nothing, so a child
+/// that failed before it created the state directory leaves none behind.
 fn explain_early_exit(child: Child, dir: &Path, timeout: Duration) -> Result<Start> {
     let output = child.wait_with_output().map_err(Error::DaemonLaunch)?;
 
-    match instance::lock(dir) {
-        // `_` drops the file at once, releasing the lock again.
-        Ok(_) => Err(Error::DaemonStartFailed {
+    if !instance::lock_held(dir)? {
+        return Err(Error::DaemonStartFailed {
             status: output.status,
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        }),
-        Err(Error::DaemonAlreadyRunning) => {
-            if wait_for_socket(&instance::socket_path(dir), timeout) {
-                Ok(Start::AlreadyRunning)
-            } else {
-                Err(Error::DaemonUnresponsive)
-            }
-        }
-        Err(e) => Err(e),
+        });
+    }
+
+    if wait_for_socket(&instance::socket_path(dir), timeout) {
+        Ok(Start::AlreadyRunning)
+    } else {
+        Err(Error::DaemonUnresponsive)
     }
 }
 
@@ -164,6 +162,19 @@ mod tests {
         assert!(
             matches!(result, Err(Error::DaemonStartFailed { status, stderr }) if status.code() == Some(3) && stderr == "boom")
         );
+    }
+
+    #[test]
+    fn reports_an_early_exit_in_a_missing_state_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("state");
+
+        let result = launch(sh("echo boom >&2; exit 3"), &dir, Duration::from_secs(5));
+
+        // The lock check finds no `daemon.pid` and creates none, so the child's own failure
+        // is the answer.
+        assert!(matches!(result, Err(Error::DaemonStartFailed { .. })));
+        assert!(!dir.exists());
     }
 
     #[test]

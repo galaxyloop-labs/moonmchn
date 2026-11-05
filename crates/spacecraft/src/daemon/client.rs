@@ -108,11 +108,11 @@ impl Client {
     /// Returns [`Error::DaemonRequest`] if the daemon rejects the request.
     /// Returns [`Error::DaemonNotRunning`] if no daemon answers, and other errors if the
     /// request or its reply fails. The variants of [`Error`] describe each case.
-    pub fn machine_start(&self, name: &str, config: machine::Config) -> Result<MachineStart> {
+    pub fn machine_start(&self, name: &str, spec: machine::Spec) -> Result<MachineStart> {
         self.request(
             &Request::MachineStart {
                 name: name.to_string(),
-                config,
+                spec,
             },
             self.operation_timeout,
         )
@@ -181,20 +181,18 @@ impl Client {
 
 /// Waits up to `timeout` for the daemon to release its lock on `daemon.pid`.
 ///
-/// Each attempt takes the lock and drops it at once, releasing it again. A `start` racing that
-/// exact instant could see it held; a sequential `stop && start` never does.
+/// Each check takes a free lock and drops it at once, releasing it again, and creates nothing:
+/// a missing `daemon.pid` counts as released. A `start` racing that exact instant could see the
+/// lock held; a sequential `stop && start` never does.
 fn wait_for_lock_release(dir: &Path, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
-    loop {
-        match instance::lock(dir) {
-            Ok(_) => return Ok(()),
-            Err(Error::DaemonAlreadyRunning) if Instant::now() < deadline => {
-                thread::sleep(SHUTDOWN_RETRY_TIMEOUT);
-            }
-            Err(Error::DaemonAlreadyRunning) => return Err(Error::DaemonStopTimeout),
-            Err(e) => return Err(e),
+    while instance::lock_held(dir)? {
+        if Instant::now() >= deadline {
+            return Err(Error::DaemonStopTimeout);
         }
+        thread::sleep(SHUTDOWN_RETRY_TIMEOUT);
     }
+    Ok(())
 }
 
 /// Connects to the daemon's socket, with `timeout` on every wait to write or read.
@@ -252,8 +250,6 @@ fn socket_error(error: io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Resources;
-    use crate::image::Image;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::mpsc;
 
@@ -348,13 +344,9 @@ mod tests {
         // 300 000 bytes makes the request larger than both, so its write can complete only as
         // the daemon reads it.
         let name = "A".repeat(300_000);
-        let config = machine::Config {
-            image: Image::parse("ghcr.io/org/name:latest").unwrap(),
-            mounts: Vec::new(),
-            resources: Resources::default(),
-        };
+        let spec = machine::Spec::default();
         let started = Instant::now();
-        let result = client.machine_start(&name, config);
+        let result = client.machine_start(&name, spec);
 
         assert!(matches!(result, Err(Error::DaemonTransport { .. })));
         assert!(started.elapsed() < Duration::from_secs(5));

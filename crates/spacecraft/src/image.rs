@@ -11,7 +11,7 @@
 //!   reference to its digest.
 //!
 //! [`Image`] and [`Digest`] hold only valid values: `parse` checks them, and serde runs the
-//! same check on every request and marker. [`DEFAULT_IMAGE`] is the image a machine boots
+//! same check on every request and marker. [`Image::default`] is the image a machine boots
 //! when `machine start` names none.
 //!
 //! # Examples
@@ -19,8 +19,9 @@
 //! ```
 //! use spacecraft::image::{Digest, Image};
 //!
-//! // What the machine boots, and the content it resolved to.
-//! let image = Image::parse("ghcr.io/galaxyloop-labs/spacecraft-images:default").unwrap();
+//! // What a machine boots when `machine start` names none, and the content it resolved to.
+//! let image = Image::default();
+//! assert_eq!(image.as_str(), "ghcr.io/galaxyloop-labs/spacecraft-images:default");
 //! let digest = Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap();
 //!
 //! // The parts a registry client needs, from the reference the image holds.
@@ -50,10 +51,6 @@ mod resolve;
 pub use archive::Archive;
 pub use digest::Digest;
 pub use reference::Reference;
-
-/// The image a machine boots by default: the `default` tag of the repository that holds every
-/// Spacecraft image.
-pub const DEFAULT_IMAGE: &str = "ghcr.io/galaxyloop-labs/spacecraft-images:default";
 
 /// The image that makes the engine read a `docker save` archive from stdin.
 const STDIN_IMAGE: &str = "-";
@@ -117,6 +114,14 @@ impl TryFrom<String> for Image {
 impl fmt::Display for Image {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl Default for Image {
+    /// The image a machine boots when `machine start` names none: the `default` tag of the
+    /// repository that holds every Spacecraft image.
+    fn default() -> Self {
+        Self::Registry(Reference::default())
     }
 }
 

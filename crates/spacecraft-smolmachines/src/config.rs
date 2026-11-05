@@ -1,51 +1,53 @@
 //! Translate Spacecraft configuration into `smolmachines` SDK types.
 //!
 //! Conversion preserves configured values and leaves unset settings at their SDK
-//! defaults, with two departures: a registry image boots pinned to its recorded
-//! digest, and every machine gets networking. It does not validate target-specific
-//! constraints or create machines; the SDK remains responsible for those operations.
+//! defaults, with two departures: a registry image boots pinned to the digest its
+//! spec holds, and every machine gets networking on virtio-net. It does not validate
+//! target-specific constraints or create machines; the SDK remains responsible for
+//! those operations.
 //!
 //! # Example
 //!
 //! ```
 //! use spacecraft::config::Resources;
-//! use spacecraft::image::{Digest, Image};
-//! use spacecraft::machine::{Config, Record};
+//! use spacecraft::image::Digest;
+//! use spacecraft::machine::{ImageSpec, Spec};
 //!
-//! let config = Config {
-//!     image: Image::parse("ghcr.io/spacecraft-dev/spacecraft:latest").unwrap(),
-//!     mounts: Vec::new(),
+//! let spec = Spec {
+//!     image: ImageSpec {
+//!         digest: Some(Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap()),
+//!         ..ImageSpec::default()
+//!     },
 //!     resources: Resources {
 //!         cpus: Some(4),
 //!         memory: Some(4096),
 //!         ..Resources::default()
 //!     },
+//!     ..Spec::default()
 //! };
-//! let record = Record {
-//!     digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
-//!     config,
-//! };
-//! let machine = spacecraft_smolmachines::machine_config(record, "my-machine");
+//! let machine = spacecraft_smolmachines::machine_config(spec, "my-machine");
 //! assert_eq!(machine.name, "my-machine");
 //! assert_eq!(machine.resources.memory_mib, Some(4096));
 //! ```
 
 use spacecraft::{
-    config::{EgressInterceptor, Mount, Port, Resources},
-    machine::Record,
+    config::{EgressEndpoint, Mount, Port, Resources},
+    machine::Spec,
 };
 
-/// Converts a machine's record into an SDK config with a caller-supplied name.
+/// Converts a machine's spec into an SDK config with a caller-supplied name.
 ///
-/// A registry image boots as `host/path@sha256:hex`, pinned to the record's digest, and an
-/// archive from its path. Settings outside the image, mounts and resources keep their SDK
-/// defaults. Conversion is infallible and does not perform validation or machine creation.
+/// The image boots as [`ImageSpec::pinned`](spacecraft::machine::ImageSpec::pinned) names it:
+/// a registry image as `host/path@sha256:hex`, pinned to the spec's digest, an archive from its
+/// path, and an image with no digest as given. Settings outside the image, mounts and resources
+/// keep their SDK defaults. Conversion is infallible and does not perform validation or machine
+/// creation.
 #[must_use]
-pub fn machine_config(record: Record, name: impl Into<String>) -> smolmachines::MachineConfig {
+pub fn machine_config(spec: Spec, name: impl Into<String>) -> smolmachines::MachineConfig {
     smolmachines::MachineConfig {
-        image: Some(record.config.image.pinned(&record.digest)),
-        mounts: record.config.mounts.into_iter().map(mount).collect(),
-        resources: resources(&record.config.resources),
+        image: Some(spec.image.pinned()),
+        mounts: spec.mounts.into_iter().map(mount).collect(),
+        resources: resources(&spec.resources),
         ..smolmachines::MachineConfig::new(name)
     }
 }
@@ -73,8 +75,8 @@ pub fn resources(resources: &Resources) -> smolmachines::Resources {
         // --cuda during local machine creation. Upgrade or fix the SDK's
         // argument mapping before relying on this flag to enable CUDA.
         cuda: resources.cuda,
-        // Both keep the SDK defaults until the egress work turns on virtio-net.
-        network_backend: None,
+        // Mediated egress needs virtio-net's host-side network stack: the engine refuses it on TSI.
+        network_backend: Some(smolmachines::NetworkBackend::VirtioNet),
         disk_durability: None,
     }
 }
@@ -98,52 +100,53 @@ pub fn port(port: Port) -> smolmachines::Port {
 
 /// Converts a runtime egress binding, preserving its address and token verbatim.
 #[must_use]
-pub fn egress_interceptor(interceptor: EgressInterceptor) -> smolmachines::EgressInterceptor {
-    smolmachines::EgressInterceptor::new(interceptor.address, interceptor.token)
+pub fn egress_endpoint(endpoint: EgressEndpoint) -> smolmachines::EgressInterceptor {
+    smolmachines::EgressInterceptor::new(endpoint.address, endpoint.token)
 }
 
 #[cfg(test)]
 mod tests {
     use spacecraft::{
-        config::{EgressInterceptor, Mount, Port, Resources},
+        config::{EgressEndpoint, Mount, Port, Resources},
         image::{Digest, Image},
-        machine::{Config, Record},
+        machine::{ImageSpec, Spec},
     };
 
-    use super::{egress_interceptor, machine_config, mount, port, resources};
+    use super::{egress_endpoint, machine_config, mount, port, resources};
 
     #[test]
-    fn every_setting_is_preserved_from_config_to_sdk_config() {
-        let record = Record {
-            digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
-            config: Config {
-                image: Image::parse("ghcr.io/org/name:latest").unwrap(),
-                mounts: vec![
-                    Mount {
-                        source: "/host/path with spaces".into(),
-                        target: "/workspace".into(),
-                        read_only: false,
-                        staged: true,
-                    },
-                    Mount {
-                        source: "s3://bucket/models".into(),
-                        target: "/models".into(),
-                        read_only: true,
-                        staged: false,
-                    },
-                ],
-                resources: Resources {
-                    cpus: Some(4),
-                    memory: Some(4096),
-                    storage: Some(20),
-                    overlay: Some(10),
-                    gpu: Some(false),
-                    gpu_vram: Some(2048),
-                    cuda: Some(false),
-                },
+    fn every_setting_is_preserved_from_spec_to_sdk_config() {
+        let spec = Spec {
+            image: ImageSpec {
+                name: Image::parse("ghcr.io/org/name:latest").unwrap(),
+                digest: Some(Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap()),
             },
+            mounts: vec![
+                Mount {
+                    source: "/host/path with spaces".into(),
+                    target: "/workspace".into(),
+                    read_only: false,
+                    staged: true,
+                },
+                Mount {
+                    source: "s3://bucket/models".into(),
+                    target: "/models".into(),
+                    read_only: true,
+                    staged: false,
+                },
+            ],
+            resources: Resources {
+                cpus: Some(4),
+                memory: Some(4096),
+                storage: Some(20),
+                overlay: Some(10),
+                gpu: Some(false),
+                gpu_vram: Some(2048),
+                cuda: Some(false),
+            },
+            ..Spec::default()
         };
-        let machine = machine_config(record, String::from("unique-machine-name"));
+        let machine = machine_config(spec, String::from("unique-machine-name"));
 
         assert_eq!(machine.name, "unique-machine-name");
         // The registry image boots pinned to the digest its tag resolved to.
@@ -171,7 +174,9 @@ mod tests {
                 gpu: Some(false),
                 gpu_vram_mib: Some(2048),
                 cuda: Some(false),
-                network_backend: None,
+                // Mediated egress needs virtio-net's host-side network stack: the engine refuses it
+                // on TSI.
+                network_backend: Some(smolmachines::NetworkBackend::VirtioNet),
                 disk_durability: None,
             }
         );
@@ -179,46 +184,51 @@ mod tests {
 
     #[test]
     fn a_local_image_is_passed_as_its_path() {
-        let record = Record {
-            digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
-            config: Config {
-                image: Image::parse("/abs/guest.tar").unwrap(),
-                mounts: Vec::new(),
-                resources: Resources::default(),
+        let spec = Spec {
+            image: ImageSpec {
+                name: Image::parse("/abs/guest.tar").unwrap(),
+                digest: Some(Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap()),
             },
+            ..Spec::default()
         };
 
-        let machine = machine_config(record, "local");
+        let machine = machine_config(spec, "local");
 
-        // A path has no pinned form: the engine boots the file, and the record keeps the
-        // digest it had at boot.
+        // A path has no pinned form: the engine boots the file, and the spec keeps the digest
+        // it had at boot.
         assert_eq!(machine.image, Some("/abs/guest.tar".to_string()));
     }
 
     #[test]
-    fn a_minimal_config_retains_sdk_defaults() {
-        let record = Record {
-            digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
-            config: Config {
-                image: Image::parse("ghcr.io/org/name:latest").unwrap(),
-                mounts: Vec::new(),
-                resources: Resources::default(),
-            },
+    fn an_unpinned_image_boots_as_given() {
+        let spec = Spec {
+            image: Image::parse("ghcr.io/org/name:latest").unwrap().into(),
+            ..Spec::default()
         };
-        let machine = machine_config(record, "bare");
+
+        let machine = machine_config(spec, "unpinned");
+
+        assert_eq!(machine.image, Some("ghcr.io/org/name:latest".to_string()));
+    }
+
+    #[test]
+    fn a_minimal_spec_retains_sdk_defaults() {
+        let machine = machine_config(Spec::default(), "bare");
         let defaults = smolmachines::MachineConfig::new("bare");
 
         assert_eq!(machine.name, defaults.name);
-        // Networking and the pinned image, which the test above checks, are the deliberate
-        // departures from the SDK defaults.
+        // Networking on virtio-net and the image, which the tests above check, are the
+        // deliberate departures from the SDK defaults.
         assert_eq!(
             machine.resources,
             smolmachines::Resources {
                 network: Some(true),
+                network_backend: Some(smolmachines::NetworkBackend::VirtioNet),
                 ..defaults.resources
             }
         );
         assert_eq!(machine.mounts, defaults.mounts);
+        // The egress binding travels with the start, so the config carries none.
         assert_eq!(machine.egress_interceptor, defaults.egress_interceptor);
         assert_eq!(machine.wait_for_ports, defaults.wait_for_ports);
         // No command: the image's own entrypoint runs.
@@ -295,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn ports_and_interceptors_convert_to_sdk_types() {
+    fn ports_and_endpoints_convert_to_sdk_types() {
         for (host, guest) in [(8080, 80), (0, u16::MAX)] {
             assert_eq!(
                 port(Port { host, guest }),
@@ -303,7 +313,7 @@ mod tests {
             );
         }
         for address in ["127.0.0.1:9000", "[::1]:9000"] {
-            let binding = egress_interceptor(EgressInterceptor {
+            let binding = egress_endpoint(EgressEndpoint {
                 address: address.parse().unwrap(),
                 token: "0123456789abcdef".repeat(4),
             });

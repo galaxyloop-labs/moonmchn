@@ -22,16 +22,27 @@ const TAG_SEPARATOR: char = ':';
 /// The tag of a registry reference that names none.
 const DEFAULT_TAG: &str = "latest";
 
+/// The registry host of the image a machine boots by default.
+const DEFAULT_IMAGE_HOST: &str = "ghcr.io";
+
+/// The repository of the image a machine boots by default: the one that holds every Spacecraft
+/// image.
+const DEFAULT_IMAGE_PATH: &str = "galaxyloop-labs/spacecraft-images";
+
+/// The tag of the image a machine boots by default.
+const DEFAULT_IMAGE_TAG: &str = "default";
+
 /// A registry reference in the form `host[:port]/path[:tag][@sha256:hex]`, split into its
 /// parts.
 ///
 /// The host must hold a `.` or a `:`, or be `localhost`, so a bare name such as `alpine` is
 /// refused. A reference without a tag gets `latest`.
 ///
-/// Other crates get one from [`Image::parse`](super::Image::parse) alone, for an image that
-/// [`Image::is_local`](super::Image::is_local) reads as a registry reference, so every
-/// `Reference` holds a valid reference. The reference is kept exactly as given: the parts fill
-/// in what it leaves out, such as the tag, and `as_str` returns it unchanged.
+/// Other crates get one from [`Image::parse`](super::Image::parse), for an image that
+/// [`Image::is_local`](super::Image::is_local) reads as a registry reference, or from `Default`,
+/// the reference of the image a machine boots by default, so every `Reference` holds a valid
+/// reference. The reference is kept exactly as given: the parts fill in what it leaves out, such
+/// as the tag, and `as_str` returns it unchanged.
 ///
 /// # Examples
 ///
@@ -146,6 +157,22 @@ impl Reference {
     pub fn pinned(&self, digest: &Digest) -> String {
         let Self { host, path, .. } = self;
         format!("{host}{HOST_SEPARATOR}{path}{DIGEST_SEPARATOR}{digest}")
+    }
+}
+
+impl Default for Reference {
+    /// The reference of the image a machine boots when `machine start` names none.
+    fn default() -> Self {
+        // Built from its parts: `parse` returns a `Result`, and the library never panics. The
+        // `image` module's example checks the outcome against the reference written out.
+        let (host, path, tag) = (DEFAULT_IMAGE_HOST, DEFAULT_IMAGE_PATH, DEFAULT_IMAGE_TAG);
+        Self {
+            image: format!("{host}{HOST_SEPARATOR}{path}{TAG_SEPARATOR}{tag}"),
+            host: host.to_string(),
+            path: path.to_string(),
+            tag: tag.to_string(),
+            digest: None,
+        }
     }
 }
 

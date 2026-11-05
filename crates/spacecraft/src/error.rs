@@ -4,12 +4,30 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
+use crate::image::Digest;
 use crate::machine::State;
 
 /// Errors produced by this crate.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// The daemon could not listen for egress decisions on the given port.
+    #[error("failed to listen for egress decisions on 127.0.0.1:{port}")]
+    EgressListen {
+        /// The port that could not be bound.
+        port: u16,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+    /// An egress pattern is invalid.
+    #[error("invalid egress pattern {pattern:?}: {reason}")]
+    InvalidEgressPattern {
+        /// The rejected pattern.
+        pattern: String,
+        /// Why the pattern is invalid.
+        reason: &'static str,
+    },
     /// Daemon stop requested, but there are still running machines.
     #[error("{count} running machine(s); pass `--force` to stop them")]
     MachinesRunning {
@@ -31,6 +49,17 @@ pub enum Error {
     MachineUnknown {
         /// The machine's name.
         name: String,
+    },
+    /// The machine's image holds other content than the digest its spec pins.
+    #[error("image {image} holds {found}, but the spec pins {pinned}")]
+    ImageDigestMismatch {
+        /// The image's name, as given.
+        image: String,
+        /// The digest the spec pins.
+        pinned: Digest,
+        /// The digest the image holds: an archive's, as the engine reads it, or the one a
+        /// registry reference names.
+        found: Digest,
     },
     /// The machine is running with a different configuration than requested.
     #[error(
@@ -141,6 +170,9 @@ pub enum Error {
     /// The daemon is shutting down, so it admits no new machine operation.
     #[error("the daemon is stopping")]
     DaemonStopping,
+    /// The operating system's random source could not supply a machine's egress token.
+    #[error("failed to mint an egress token")]
+    TokenMint(#[source] io::Error),
     /// A directory is not safe for per-user configuration or state.
     #[error("unsafe directory {}: {reason}", path.display())]
     UnsafeDirectory {
@@ -206,6 +238,14 @@ impl Error {
     pub(crate) fn invalid_image(image: &str, reason: &'static str) -> Self {
         Self::InvalidImage {
             image: image.to_string(),
+            reason,
+        }
+    }
+
+    /// Names the rejected egress pattern and the rule it breaks.
+    pub(crate) fn invalid_egress_pattern(pattern: &str, reason: &'static str) -> Self {
+        Self::InvalidEgressPattern {
+            pattern: pattern.to_string(),
             reason,
         }
     }

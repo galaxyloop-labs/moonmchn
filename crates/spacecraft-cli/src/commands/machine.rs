@@ -5,7 +5,7 @@ use std::os::unix::process::CommandExt;
 
 use anyhow::Context;
 use spacecraft::daemon::api::{MachineStart, MachineStatus, MachineStop};
-use spacecraft::image::{DEFAULT_IMAGE, Image};
+use spacecraft::image::Image;
 use spacecraft::machine;
 
 use super::client;
@@ -52,18 +52,11 @@ pub fn run(subcommand: MachineCommand, out: &mut impl Write) -> anyhow::Result<(
 /// Boots `name` from `image`, or the default image, with the configuration file's settings,
 /// and describes the outcome.
 fn start(name: &str, image: Option<&str>) -> anyhow::Result<String> {
-    // The machine configuration holds the configuration file's fields, plus the image.
-    // Destructuring fails to compile once the file gains a field, and the literal below once
-    // the machine configuration does.
-    let spacecraft::Config { mounts, resources } = spacecraft::Config::load()?;
-    let image = Image::resolve(image.unwrap_or(DEFAULT_IMAGE))?;
-    let config = machine::Config {
-        image,
-        mounts,
-        resources,
-    };
+    let config = spacecraft::Config::load()?;
+    let image = image.map(Image::resolve).transpose()?.unwrap_or_default();
+    let spec = machine_spec(config, image);
 
-    Ok(match client()?.machine_start(name, config)? {
+    Ok(match client()?.machine_start(name, spec)? {
         MachineStart::Started(status) => {
             format!("Machine {name} started{}", pid_suffix(status.pid))
         }
@@ -71,6 +64,30 @@ fn start(name: &str, image: Option<&str>) -> anyhow::Result<String> {
             format!("Machine {name} already running{}", pid_suffix(status.pid))
         }
     })
+}
+
+/// The spec `start` sends: the configuration file's mounts, resources and `[egress]` lists as
+/// written, and `image` with no digest, since the daemon pins the image when the machine boots.
+fn machine_spec(config: spacecraft::Config, image: Image) -> machine::Spec {
+    // The machine spec holds the configuration file's fields, plus the image.
+    // Destructuring fails to compile once the file gains a field, and the literal below once
+    // the machine spec does.
+    let spacecraft::Config {
+        mounts,
+        resources,
+        egress,
+    } = config;
+
+    machine::Spec {
+        // No digest: the daemon pins the image when the machine boots.
+        image: machine::ImageSpec {
+            name: image,
+            digest: None,
+        },
+        mounts,
+        resources,
+        egress,
+    }
 }
 
 /// Opens a session in machine `name`: resolves it through the daemon, then replaces this
@@ -95,7 +112,7 @@ fn pid_suffix(pid: Option<u32>) -> String {
     pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
 }
 
-/// Renders a machine's state, or with `extended`, its name, state and record.
+/// Renders a machine's state, or with `extended`, its name, state and spec.
 fn render_status(status: &MachineStatus, extended: bool) -> anyhow::Result<String> {
     let state = format!("{}{}", status.status.state, pid_suffix(status.status.pid));
     if !extended {
@@ -103,10 +120,10 @@ fn render_status(status: &MachineStatus, extended: bool) -> anyhow::Result<Strin
     }
 
     let mut text = format!("Name:   {}\nState:  {state}\n", status.status.name);
-    // A machine caught between its claim and its marker has no record yet.
-    if let Some(record) = &status.record {
+    // A machine caught between its claim and its marker has no spec yet.
+    if let Some(spec) = &status.marker {
         text.push('\n');
-        text.push_str(&record.to_toml()?);
+        text.push_str(&spec.to_toml()?);
     }
 
     Ok(text)
@@ -120,20 +137,54 @@ fn is_tty(no_tty: bool, stdin: &Stdin, stdout: &Stdout, stderr: &Stderr) -> bool
 
 #[cfg(test)]
 mod tests {
-    use spacecraft::config::Resources;
-    use spacecraft::image::{Digest, Image};
+    use spacecraft::config::{Egress, Mount, Pattern, Resources};
     use spacecraft::machine::State;
 
     use super::*;
 
-    fn report(state: State, pid: Option<u32>, record: Option<machine::Record>) -> MachineStatus {
+    #[test]
+    fn machine_spec_carries_the_settings_and_the_unpinned_image() {
+        let config = spacecraft::Config {
+            mounts: vec![Mount {
+                source: "/host/src".to_string(),
+                target: "/workspace".to_string(),
+                read_only: true,
+                staged: false,
+            }],
+            resources: Resources {
+                cpus: Some(2),
+                ..Resources::default()
+            },
+            egress: Egress {
+                allow: vec![Pattern::parse("api.github.com").unwrap()],
+                deny: vec![Pattern::parse("upload.pypi.org").unwrap()],
+            },
+        };
+        let image = Image::parse("ghcr.io/org/name:latest").unwrap();
+
+        let spec = machine_spec(config.clone(), image.clone());
+
+        // No digest: the daemon pins the image when the machine boots.
+        assert_eq!(
+            spec.image,
+            machine::ImageSpec {
+                name: image,
+                digest: None,
+            }
+        );
+        assert_eq!(spec.mounts, config.mounts);
+        assert_eq!(spec.resources, config.resources);
+        assert_eq!(spec.egress, config.egress);
+    }
+
+    fn report(state: State, pid: Option<u32>, spec: Option<machine::Spec>) -> MachineStatus {
         MachineStatus {
             status: machine::Status {
                 name: "alpha".to_string(),
                 state,
                 pid,
             },
-            record,
+            marker: spec,
         }
     }
 
@@ -151,18 +202,8 @@ mod tests {
 
     #[test]
     fn renders_extended_status_with_and_without_configuration() {
-        let record = machine::Record {
-            digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
-            config: machine::Config {
-                image: Image::parse("ghcr.io/org/name:latest").unwrap(),
-                mounts: Vec::new(),
-                resources: Resources {
-                    cpus: Some(2),
-                    ..Resources::default()
-                },
-            },
-        };
-        let with = report(State::Running, Some(4242), Some(record.clone()));
+        let spec = machine::Spec::default();
+        let with = report(State::Running, Some(4242), Some(spec.clone()));
         let without = report(State::Running, Some(4242), None);
 
         let rendered = render_status(&with, true).unwrap();
@@ -170,10 +211,10 @@ mod tests {
             rendered,
             format!(
                 "Name:   alpha\nState:  running (pid 4242)\n\n{}",
-                record.to_toml().unwrap()
+                spec.to_toml().unwrap()
             )
         );
-        assert!(rendered.contains("digest = "), "{rendered}");
+        assert!(rendered.contains("[image]"), "{rendered}");
         assert_eq!(
             render_status(&without, true).unwrap(),
             "Name:   alpha\nState:  running (pid 4242)\n"

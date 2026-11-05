@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 /// Request to the daemon.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one request per connection, matched once: boxing the spec saves nothing"
+)]
 pub enum Request {
     /// Request the status of the daemon.
     Status {},
@@ -19,8 +23,8 @@ pub enum Request {
     MachineStart {
         /// The name of the machine to start.
         name: String,
-        /// The configuration for the machine.
-        config: machine::Config,
+        /// The requested machine spec.
+        spec: machine::Spec,
     },
     /// Request the stop of a machine.
     MachineStop {
@@ -88,13 +92,14 @@ pub enum MachineStop {
 pub struct MachineStatus {
     /// The status of the machine.
     pub status: machine::Status,
-    /// The record of the machine, if available.
-    pub record: Option<machine::Record>,
+    /// The spec in the machine's marker, its image pinned, once a marker holds one. The
+    /// marker's token never leaves the daemon.
+    pub marker: Option<machine::Spec>,
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::config::Resources;
+    use crate::config::{Egress, Pattern};
     use crate::image::{Digest, Image};
     use crate::machine::State::Running;
 
@@ -159,18 +164,35 @@ mod tests {
 
         let machine_start = Request::MachineStart {
             name: "x".to_string(),
-            config: machine::Config {
-                image: Image::parse("ghcr.io/org/name:latest").unwrap(),
-                mounts: Vec::new(),
-                resources: Resources::default(),
-            },
+            spec: machine::Spec::default(),
         };
         let line = serde_json::to_string(&machine_start).unwrap();
 
-        assert!(line.starts_with(r#"{"machine_start":{"name":"x","config":{"#));
+        assert!(line.starts_with(r#"{"machine_start":{"name":"x","spec":{"#));
         assert_eq!(
             serde_json::from_str::<Request>(&line).unwrap(),
             machine_start
+        );
+
+        let machine_start_with_egress = Request::MachineStart {
+            name: "x".to_string(),
+            spec: machine::Spec {
+                egress: Egress {
+                    allow: vec![Pattern::parse("api.github.com").unwrap()],
+                    deny: vec![],
+                },
+                ..machine::Spec::default()
+            },
+        };
+        let line = serde_json::to_string(&machine_start_with_egress).unwrap();
+
+        assert!(
+            line.contains(r#""egress":{"allow":["api.github.com"],"deny":[]}"#),
+            "{line}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(&line).unwrap(),
+            machine_start_with_egress
         );
 
         let machine_stop = Request::MachineStop {
@@ -242,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn machine_status_reply_carries_the_record() {
+    fn machine_status_reply_carries_the_spec() {
         let status = machine::Status {
             name: "x".to_string(),
             state: Running,
@@ -251,26 +273,31 @@ mod tests {
 
         let done = Reply::Done(MachineStatus {
             status: status.clone(),
-            record: None,
+            marker: None,
         });
         assert_eq!(
             serde_json::to_string(&done).unwrap(),
-            r#"{"done":{"status":{"name":"x","state":"running","pid":4242},"record":null}}"#
+            r#"{"done":{"status":{"name":"x","state":"running","pid":4242},"marker":null}}"#
         );
 
         let done = Reply::Done(MachineStatus {
             status,
-            record: Some(machine::Record {
-                digest: Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
-                config: machine::Config {
-                    image: Image::parse("ghcr.io/org/name:latest").unwrap(),
-                    mounts: Vec::new(),
-                    resources: Resources::default(),
+            marker: Some(machine::Spec {
+                image: machine::ImageSpec {
+                    name: Image::parse("ghcr.io/org/name:latest").unwrap(),
+                    digest: Some(Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap()),
                 },
+                ..machine::Spec::default()
             }),
         });
         let line = serde_json::to_string(&done).unwrap();
 
-        assert!(line.contains(r#""record":{"digest":"#), "{line}");
+        assert!(
+            line.contains(&format!(
+                r#""marker":{{"image":{{"name":"ghcr.io/org/name:latest","digest":"sha256:{}"}}"#,
+                "a".repeat(64)
+            )),
+            "{line}"
+        );
     }
 }

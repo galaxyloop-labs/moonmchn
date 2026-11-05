@@ -315,6 +315,23 @@ fn machine_commands_need_the_daemon() {
 }
 
 #[test]
+fn client_commands_create_no_state_directory() {
+    let runtime = Runtime::new();
+    let missing = runtime.dir.path().join("state");
+
+    runtime
+        .spacecraft()
+        .env("SPACECRAFT_HOME", &missing)
+        .args(["machine", "list"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr("error: the daemon is not running\n");
+
+    assert!(!missing.exists());
+}
+
+#[test]
 fn machine_exec_and_shell_need_the_daemon() {
     let runtime = Runtime::new();
 

@@ -15,7 +15,7 @@ use crate::common::FakeEngine;
 
 #[test]
 fn answers_status() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::state_dir();
     common::start_daemon(dir.path().to_path_buf());
     let client = Client::new(dir.path().to_path_buf());
 
@@ -26,8 +26,21 @@ fn answers_status() {
 }
 
 #[test]
+fn creates_its_state_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("state");
+    common::start_daemon(dir.clone());
+    let client = Client::new(dir.clone());
+
+    common::wait_for_status(&client).unwrap();
+
+    // The modes are the state directory module's to check.
+    assert!(dir.join("machines").is_dir());
+}
+
+#[test]
 fn errors_on_malformed_message() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::state_dir();
     common::start_daemon(dir.path().to_path_buf());
     let socket_path = dir.path().join("daemon.sock");
     let client = Client::new(dir.path().to_path_buf());
@@ -46,7 +59,7 @@ fn errors_on_malformed_message() {
 
 #[test]
 fn rejects_an_oversized_request() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::state_dir();
     common::start_daemon(dir.path().to_path_buf());
     let socket_path = dir.path().join("daemon.sock");
     let client = Client::new(dir.path().to_path_buf());
@@ -69,7 +82,7 @@ fn rejects_an_oversized_request() {
 
 #[test]
 fn drops_an_idle_connection() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::state_dir();
     common::start_daemon(dir.path().to_path_buf());
     let socket_path = dir.path().join("daemon.sock");
     let client = Client::new(dir.path().to_path_buf());
@@ -90,9 +103,11 @@ fn drops_an_idle_connection() {
 
 #[test]
 fn shutdowns_on_request() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::state_dir();
     let t = common::start_daemon(dir.path().to_path_buf());
-    let socket_path = dir.path().join("daemon.sock");
+    // The daemon works in its state directory's resolved path, which is where it reports its
+    // socket: macOS's `/var` is a link to `/private/var`.
+    let socket_path = dir.path().canonicalize().unwrap().join("daemon.sock");
     let client = Client::new(dir.path().to_path_buf());
 
     let _status = common::wait_for_status(&client).unwrap();
@@ -118,7 +133,7 @@ fn shutdowns_on_request() {
 
 #[test]
 fn refuses_a_second_daemon() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::state_dir();
     common::start_daemon(dir.path().to_path_buf());
     let client = Client::new(dir.path().to_path_buf());
 

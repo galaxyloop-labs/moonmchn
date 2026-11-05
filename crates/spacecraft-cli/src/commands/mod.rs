@@ -7,10 +7,11 @@ pub mod machine;
 pub mod setup;
 pub mod version;
 
-/// A client for the daemon whose files live in the state directory, created when missing.
+/// A client for the daemon whose files live in the state directory, located and checked,
+/// never created: only the daemon creates it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn client() -> anyhow::Result<spacecraft::daemon::Client> {
     Ok(spacecraft::daemon::Client::new(
-        spacecraft::daemon::prepare_state_directory()?,
+        spacecraft::daemon::locate_state_directory()?,
     ))
 }

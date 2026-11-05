@@ -12,17 +12,19 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
 use tokio::signal::unix::{self, SignalKind};
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::daemon::api::{Reply, Request, Status};
-use crate::daemon::instance;
 use crate::daemon::machines::Machines;
+use crate::daemon::{decider, egress, instance, state};
 use crate::machine::Engine;
 use crate::{Error, Result};
 
 /// The maximum number of bytes a request may contain, to avoid denial-of-service attacks.
-/// It's large enough to hold a machine start request with a configuration.
+/// It's large enough to hold a machine start request with a spec.
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 
 /// How long a client may take to send its request; an idle or stalled client is dropped.
@@ -45,7 +47,13 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const TEARDOWN_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// The pause after a failed accept, so a persistent error such as `EMFILE` cannot spin the loop.
-const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// The decider's listener waits as long after one of its own.
+pub(super) const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// The most of the decider's lines that wait to be written. Past it, a new line overwrites the
+/// oldest, and the daemon writes how many it lost, so a guest whose denied flows come faster
+/// than the log takes their lines cannot grow the daemon's memory.
+const LOG_LINES_MAX: usize = 1024;
 
 /// The mode in which the daemon server is running.
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +65,19 @@ pub enum Mode {
 }
 
 /// Start the daemon server in the given directory and write output to `out`.
+///
+/// The daemon alone creates its state directory: `dir`, its missing parents and the
+/// directories it keeps inside, before anything else touches them, with the checks
+/// [`locate_state_directory`](crate::daemon::locate_state_directory) describes. It works in
+/// the resolved path from then on. After claiming the lock, it loads the machines' tokens and
+/// binds the egress listener before creating the control socket or announcing readiness. A
+/// persisted port that cannot be bound while any marker remains fails with `EgressListen`.
+/// The decider answers on that listener until the teardown ends. Its lines reach `out` as they
+/// happen until the daemon notices a shutdown, and the ones queued by then are written ahead of
+/// the teardown's own; a line sent during the teardown is dropped, so `stopped` stays the last
+/// line. At most `LOG_LINES_MAX` of them wait: past that, the oldest go, and one line counts
+/// them. Requests are admitted ahead of the decider's lines, so a guest whose denied flows keep
+/// coming cannot hold off one.
 ///
 /// The daemon serves until a shutdown request or `SIGTERM`, then tears down: it closes
 /// admission, waits up to `teardown_timeout` for every accepted request to finish, boots in
@@ -76,10 +97,12 @@ pub enum Mode {
 ///
 /// # Errors
 ///
-/// Returns [`Error::DaemonAlreadyRunning`] if another daemon holds the lock in `dir`, and
-/// other errors if the socket, the runtime, or detached mode cannot be set up. The variants
-/// of [`Error`] describe each case. A failed accept is written to `out`, and the daemon keeps
-/// serving.
+/// Returns [`Error::UnsafeDirectory`] if `dir` or a directory above it breaks those checks,
+/// [`Error::Io`] if one cannot be created or inspected, [`Error::DaemonAlreadyRunning`] if
+/// another daemon holds the lock in `dir`, [`Error::EgressListen`] if the egress listener
+/// cannot be bound, and other errors if the socket, the runtime, or detached mode cannot be
+/// set up. The variants of [`Error`] describe each case. A failed accept is written to `out`,
+/// and the daemon keeps serving.
 pub fn serve_in<E: Engine>(
     dir: &Path,
     mode: Mode,
@@ -91,10 +114,15 @@ pub fn serve_in<E: Engine>(
         rustix::process::setsid().map_err(|e| Error::DaemonServe(e.into()))?;
     }
 
+    // The lock, the registry, the socket and the log all live in the state directory, so it is
+    // laid out before any of them.
+    let dir = &state::prepare_in(dir, rustix::process::geteuid().as_raw())?;
+
     // The registry owns the lock from here on, and hands a clone to every worker that may
     // change the directory; see the end of this function for when the lock is released.
     let lock = instance::claim(dir)?;
-    let machines = Arc::new(Machines::open(dir, lock)?);
+    let egress = Arc::new(egress::State::bind(dir)?);
+    let machines = Arc::new(Machines::new(dir, lock, Arc::clone(&egress)));
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
@@ -111,6 +139,10 @@ pub fn serve_in<E: Engine>(
             Mode::Detached => Some(instance::open_log(dir)?),
             Mode::Foreground => None,
         };
+        // A broadcast channel, for its ring: the decider never waits to send, at most
+        // `LOG_LINES_MAX` lines wait to be written, and the reader learns how many it lost.
+        let (log_tx, mut log_rx) = broadcast::channel::<String>(LOG_LINES_MAX);
+        let decider = tokio::spawn(decider::serve::<E::Gateway>(Arc::clone(&egress), log_tx));
         announce_ready(out, &socket, log.as_ref())?;
 
         // Every request handler, so the teardown can wait for them all.
@@ -136,12 +168,30 @@ pub fn serve_in<E: Engine>(
                         let _ = writeln!(out, "accept failed: {e}");
                         tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
                     }
+                },
+
+                // The decider's lines, as it sends them. They come last, so a guest whose denied
+                // flows keep them coming cannot hold off a request, and after the shutdown arms,
+                // so the lines still queued once the loop ends are written after it. Once the
+                // decider is gone, `next_line` yields `None`, which disables this branch for this
+                // turn of the loop.
+                Some(line) = next_line(&mut log_rx) => {
+                    let _ = writeln!(out, "{line}");
                 }
             }
         }
 
+        // A line the decider sent before the shutdown was noticed comes ahead of the teardown's
+        // own.
+        while let Some(line) = queued_line(&mut log_rx) {
+            let _ = writeln!(out, "{line}");
+        }
+
         // After a shutdown request and after `SIGTERM` alike.
         teardown::<E>(&machines, &mut handlers, out, teardown_timeout).await;
+        // The decider answers until the teardown ends. The lines it sent during the teardown
+        // drop with `log_rx`, so `stopped` stays the last line.
+        decider.abort();
 
         Ok(())
     });
@@ -180,6 +230,33 @@ fn announce_ready(out: &mut impl Write, socket: &Path, log: Option<&File>) -> Re
     }
 
     Ok(())
+}
+
+/// Waits for the decider's next line on `log` and returns it, or, when lines came faster than
+/// the daemon wrote them and the oldest were overwritten, a line that counts those. Returns
+/// `None` once the decider and its flows are gone.
+async fn next_line(log: &mut broadcast::Receiver<String>) -> Option<String> {
+    match log.recv().await {
+        Ok(line) => Some(line),
+        Err(RecvError::Lagged(missed)) => Some(dropped_lines(missed)),
+        Err(RecvError::Closed) => None,
+    }
+}
+
+/// Returns what `next_line` would when a line is queued on `log` already, and `None` when none
+/// is.
+fn queued_line(log: &mut broadcast::Receiver<String>) -> Option<String> {
+    match log.try_recv() {
+        Ok(line) => Some(line),
+        Err(TryRecvError::Lagged(missed)) => Some(dropped_lines(missed)),
+        Err(TryRecvError::Empty | TryRecvError::Closed) => None,
+    }
+}
+
+/// The line that stands for `missed` lines of the decider's, overwritten before the daemon
+/// wrote them.
+fn dropped_lines(missed: u64) -> String {
+    format!("egress: {missed} lines dropped: the log fell behind")
 }
 
 /// Tears the daemon down: closes admission, waits for the accepted requests, stops every
@@ -259,8 +336,8 @@ async fn handle<E: Engine>(
     match request {
         Ok(Request::Status {}) => send(&mut writer, Ok(status())).await,
         Ok(Request::Shutdown { force }) => shutdown(&mut writer, &machines, &tx, force).await,
-        Ok(Request::MachineStart { name, config }) => {
-            send(&mut writer, machines.start::<E>(name, config).await).await
+        Ok(Request::MachineStart { name, spec }) => {
+            send(&mut writer, machines.start::<E>(name, spec).await).await
         }
         Ok(Request::MachineStatus { name }) => {
             send(&mut writer, machines.status::<E>(name).await).await
@@ -346,4 +423,34 @@ async fn send<T: Serialize>(stream: &mut OwnedWriteHalf, result: Result<T>) -> i
     };
 
     send_reply(stream, &reply).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lines_lost_to_a_full_queue_are_counted() {
+        // Room for 2 lines, and 5 sent before either reader reads: the oldest 3 are overwritten.
+        let (log, mut waited) = broadcast::channel(2);
+        let mut drained = log.subscribe();
+        for line in ["1", "2", "3", "4", "5"] {
+            log.send(line.to_string()).unwrap();
+        }
+
+        // The loop waits for each line, and the drain after it takes the ones queued: both
+        // count the lines they lost, then go on with the rest.
+        let lines = ["egress: 3 lines dropped: the log fell behind", "4", "5"];
+        for line in lines {
+            assert_eq!(next_line(&mut waited).await.as_deref(), Some(line));
+        }
+        assert_eq!(
+            std::iter::from_fn(|| queued_line(&mut drained)).collect::<Vec<_>>(),
+            lines
+        );
+
+        // Once the decider is gone, the loop's branch ends.
+        drop(log);
+        assert_eq!(next_line(&mut waited).await, None);
+    }
 }

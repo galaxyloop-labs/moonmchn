@@ -1,22 +1,45 @@
 //! Spacecraft's machine traits, implemented with smolmachines.
 
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use smolmachines::{ExecOptions, Machine as SdkMachine, MachineState};
+use smolmachines::{ErrorKind, ExecOptions, Machine as SdkMachine, MachineState};
 
+use spacecraft::config::EgressEndpoint;
 use spacecraft::image::{Digest, Image};
 use spacecraft::machine::{self, State, Status};
 use spacecraft::{Error, Result};
 
+use crate::gateway::Gateway;
 use crate::machine_config;
+use crate::session::{MACHINE, NAME_FLAG};
+
+/// The `machine` subcommand that boots a created machine.
+const START: &str = "start";
+
+/// Routes the machine's outbound TCP through the decider at the address that follows; the
+/// engine reads the token from its environment.
+const EGRESS_INTERCEPTOR_FLAG: &str = "--egress-interceptor";
+
+/// Requires the decider's answer before the gateway dials a flow's destination.
+const MEDIATED_EGRESS_FLAG: &str = "--mediated-egress";
+
+/// Holds the machine's token in the engine's environment; the gateway presents it to the
+/// decider.
+const INTERCEPTOR_TOKEN_ENV: &str = "SMOLVM_INTERCEPTOR_TOKEN";
+
+/// Ties the VM's life to the process that boots it, when set. `machine start` exits once the
+/// guest answers, so the variable is removed, as the SDK removes it from its own engine calls.
+const BOOT_BINARY_ENV: &str = "SMOLVM_BOOT_BINARY";
 
 /// Spacecraft engine implementation for smolmachines.
 pub struct Engine;
 
 impl machine::Engine for Engine {
     type Machine = Machine;
+    type Gateway = Gateway;
 
     fn image_digest(image: &Image) -> Result<Digest> {
         crate::image::digest(image)
@@ -27,11 +50,11 @@ impl machine::Engine for Engine {
 pub struct Machine(SdkMachine);
 
 impl machine::Machine for Machine {
-    fn start(name: &str, record: machine::Record) -> Result<Self> {
-        let machine = SdkMachine::create(machine_config(record, name))
-            .map_err(|error| engine_error(&error))?;
+    fn start(name: &str, spec: machine::Spec, egress: &EgressEndpoint) -> Result<Self> {
+        let machine =
+            SdkMachine::create(machine_config(spec, name)).map_err(|error| engine_error(&error))?;
 
-        match machine.start() {
+        match start_mediated(name, egress) {
             Ok(()) => Ok(Self(machine)),
             Err(boot) => Err(cleanup_failed_boot(&machine, name, &boot)),
         }
@@ -52,6 +75,9 @@ impl machine::Machine for Machine {
     }
 
     fn resume(&self) -> Result<()> {
+        // `machine resume` takes no interceptor, so the engine refuses to resume a machine
+        // `start` booted: "mediated egress: this machine requires an external interceptor on
+        // every start". The daemon passes that error on.
         self.0.resume().map_err(|error| engine_error(&error))
     }
 
@@ -175,11 +201,95 @@ fn confirms_absence(name: &str, message: &str) -> bool {
         .is_some_and(|(_, rest)| rest.trim() == name)
 }
 
+/// Boots a created machine with its gateway bound to the decider, waiting for the guest agent.
+///
+/// ponytail: SDK 1.32.2 cannot pass `--mediated-egress` (smol-machines/smol#314). Like
+/// `session`, run the engine's CLI directly until `start_with_interceptor` carries the flag.
+/// Its errors are the SDK's, as that method's are, so the swap changes only the call in `start`.
+fn start_mediated(name: &str, binding: &EgressEndpoint) -> smolmachines::Result<()> {
+    let engine_cli = smolmachines::engine_cli()?;
+    let args = mediated_start_args(name, binding);
+
+    let output = Command::new(&engine_cli)
+        .args(&args)
+        .env(INTERCEPTOR_TOKEN_ENV, &binding.token)
+        .env_remove(BOOT_BINARY_ENV)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            smolmachines::Error::new(
+                ErrorKind::Other,
+                format!("run {}: {error}", engine_cli.display()),
+            )
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    // Match the SDK's cli_error: prefer stderr, falling back to stdout when it is empty.
+    let message = String::from_utf8_lossy(if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    })
+    .trim()
+    .to_string();
+
+    Err(smolmachines::Error::new(
+        ErrorKind::Other,
+        if message.is_empty() {
+            format!("smolvm {} failed", args.join(" "))
+        } else {
+            message
+        },
+    ))
+}
+
+/// Returns the engine's `machine start` arguments for a machine whose gateway asks `binding`'s
+/// decider about every flow. The token stays out: `start_mediated` hands it over in the
+/// environment, since every process listing on the host shows the arguments.
+#[must_use]
+fn mediated_start_args(name: &str, binding: &EgressEndpoint) -> Vec<String> {
+    vec![
+        MACHINE.to_string(),
+        START.to_string(),
+        NAME_FLAG.to_string(),
+        name.to_string(),
+        EGRESS_INTERCEPTOR_FLAG.to_string(),
+        binding.address.to_string(),
+        MEDIATED_EGRESS_FLAG.to_string(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::time::Instant;
+
+    #[test]
+    fn mediated_start_arguments_are_exact() {
+        // The engine's own `machine start`, pointed at the decider. The token travels in the
+        // environment: an argument would show in every process listing on the host.
+        let binding = EgressEndpoint {
+            address: "127.0.0.1:9000".parse().unwrap(),
+            token: "0123456789abcdef".repeat(4),
+        };
+
+        assert_eq!(
+            mediated_start_args("alpha", &binding),
+            [
+                "machine",
+                "start",
+                "--name",
+                "alpha",
+                "--egress-interceptor",
+                "127.0.0.1:9000",
+                "--mediated-egress",
+            ]
+        );
+    }
 
     #[test]
     fn state_mapping_separates_dead_from_unknown() {
