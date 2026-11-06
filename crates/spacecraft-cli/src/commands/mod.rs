@@ -1,11 +1,11 @@
 //! One module per subcommand.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub mod daemon;
+pub(crate) mod daemon;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub mod machine;
-pub mod setup;
-pub mod version;
+pub(crate) mod machine;
+pub(crate) mod setup;
+pub(crate) mod version;
 
 /// A client for the daemon whose files live in the state directory, located and checked,
 /// never created: only the daemon creates it.

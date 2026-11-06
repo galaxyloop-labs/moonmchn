@@ -102,7 +102,7 @@ fn explain_early_exit(child: Child, dir: &Path, timeout: Duration) -> Result<Sta
 fn leave_running(mut child: Child) -> Start {
     let pid = child.id();
     thread::spawn(move || {
-        let _ = child.wait();
+        drop(child.wait());
     });
     Start::Started { pid }
 }
@@ -112,12 +112,13 @@ fn leave_running(mut child: Child) -> Start {
 /// A read timeout means the daemon did not start in time; any other read error is a launch
 /// failure.
 fn kill_unready(mut child: Child, error: io::Error) -> Error {
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child.kill());
+    drop(child.wait());
 
-    match error.kind() {
-        ErrorKind::WouldBlock | ErrorKind::TimedOut => Error::DaemonStartTimeout,
-        _ => Error::DaemonLaunch(error),
+    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+        Error::DaemonStartTimeout
+    } else {
+        Error::DaemonLaunch(error)
     }
 }
 

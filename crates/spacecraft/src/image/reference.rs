@@ -225,7 +225,7 @@ mod tests {
                 "ghcr.io",
                 "org/name",
                 "v2",
-                Some(Digest(lower.clone())),
+                Some(Digest(lower)),
             ),
             (
                 "localhost/name".to_string(),
@@ -239,7 +239,7 @@ mod tests {
                 "localhost:5000",
                 "org/nested/name",
                 "v2",
-                Some(Digest(upper.clone())),
+                Some(Digest(upper)),
             ),
         ];
 

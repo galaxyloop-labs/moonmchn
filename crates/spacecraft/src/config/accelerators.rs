@@ -48,7 +48,7 @@ impl Accelerators {
     const MAX_VRAM: Mib = Mib::new(4096);
 
     /// Round larger budgets down to this block size; this is not a minimum.
-    const VRAM_BLOCK_SIZE: Mib = Mib::new(256);
+    const VRAM_BLOCK_MIB: u64 = 256;
 
     /// Recommends a default size for the engine's graphics shared-memory region.
     ///
@@ -81,9 +81,10 @@ impl Accelerators {
 
         // Reserve most RAM for the host and cap the recommendation even on
         // large machines. Keep MiB arithmetic wide until after applying limits.
-        let mut budget_mib = (host_memory / Self::HOST_MEMORY_DIVISOR)
-            .as_mib()
-            .min(u64::from(u32::from(Self::MAX_VRAM)));
+        let mut budget_mib =
+            ByteSize::from_bytes(host_memory.as_bytes() / Self::HOST_MEMORY_DIVISOR)
+                .as_mib()
+                .min(u64::from(u32::from(Self::MAX_VRAM)));
 
         // Unified/shared memory and missing or zero measurements have no
         // dedicated VRAM limit, so they use only the host-memory budget.
@@ -94,9 +95,8 @@ impl Accelerators {
 
         // Round down, never up past a capacity limit. Preserve positive budgets
         // below one block rather than imposing an unsafe minimum allocation.
-        let block_mib = u64::from(u32::from(Self::VRAM_BLOCK_SIZE));
-        if budget_mib >= block_mib {
-            budget_mib = budget_mib / block_mib * block_mib;
+        if budget_mib >= Self::VRAM_BLOCK_MIB {
+            budget_mib = budget_mib.saturating_sub(budget_mib % Self::VRAM_BLOCK_MIB);
         }
 
         // Omit budgets smaller than one whole MiB rather than serializing zero.

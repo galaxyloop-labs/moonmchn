@@ -655,6 +655,6 @@ mod tests {
                 .to_string(),
         };
         // The client may be gone already; the thread lives on for the next connection.
-        let _ = stream.write_all(response.as_bytes());
+        drop(stream.write_all(response.as_bytes()));
     }
 }

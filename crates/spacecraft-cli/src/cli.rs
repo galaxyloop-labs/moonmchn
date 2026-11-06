@@ -9,7 +9,7 @@ use crate::commands;
 /// `spacecraft` command line.
 #[derive(Debug, Parser)]
 #[command(name = "spacecraft", version, about, propagate_version = true)]
-pub struct Cli {
+pub(crate) struct Cli {
     /// Subcommand to run.
     #[command(subcommand)]
     pub command: Command,
@@ -18,7 +18,7 @@ pub struct Cli {
 /// `spacecraft daemon` subcommands.
 #[derive(Debug, Clone, Copy, Subcommand)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub enum DaemonCommand {
+pub(crate) enum DaemonCommand {
     /// Start the daemon in the background
     Start {
         /// Run the daemon in this process; used by start
@@ -38,7 +38,7 @@ pub enum DaemonCommand {
 /// `spacecraft machine` subcommands.
 #[derive(Debug, Clone, Subcommand)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub enum MachineCommand {
+pub(crate) enum MachineCommand {
     /// Create and boot a machine from the configuration
     Start {
         /// The machine's name
@@ -85,7 +85,7 @@ pub enum MachineCommand {
 
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
     /// Create the configuration file, ~/.config/spacecraft/config.toml by default
     ///
     /// The file goes to `$SPACECRAFT_HOME/config.toml` when `SPACECRAFT_HOME` is set, else
@@ -118,7 +118,7 @@ impl Cli {
     /// # Errors
     ///
     /// Returns the subcommand's error unchanged.
-    pub fn run(self, out: &mut impl Write) -> anyhow::Result<()> {
+    pub(crate) fn run(self, out: &mut impl Write) -> anyhow::Result<()> {
         match self.command {
             Command::Setup { force } => commands::setup::run(force, out),
             Command::Version => commands::version::run(out),

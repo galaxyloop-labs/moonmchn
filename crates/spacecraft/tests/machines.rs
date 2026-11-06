@@ -1,5 +1,17 @@
 //! End-to-end tests for the machines the Spacecraft daemon starts, stops and reports.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    reason = "Tests may panic and print diagnostics"
+)]
+
 use spacecraft::config::{Egress, EgressEndpoint, Mount, Pattern, Resources};
 use spacecraft::daemon::api::{MachineStart, MachineStatus, MachineStop, Reply, Request};
 use spacecraft::daemon::client::Client;

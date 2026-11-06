@@ -169,7 +169,7 @@ pub(super) async fn serve<G: Gateway>(state: Arc<State>, log: broadcast::Sender<
     let listener = match listener {
         Ok(listener) => listener,
         Err(error) => {
-            let _ = log.send(format!("egress: listener failed: {error}"));
+            drop(log.send(format!("egress: listener failed: {error}")));
             return;
         }
     };
@@ -193,7 +193,7 @@ pub(super) async fn serve<G: Gateway>(state: Arc<State>, log: broadcast::Sender<
                 ));
             }
             Err(error) => {
-                let _ = log.send(format!("egress: accept failed: {error}"));
+                drop(log.send(format!("egress: accept failed: {error}")));
                 tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
             }
         }
@@ -241,9 +241,9 @@ async fn handle_flow<G: Gateway, S: AsyncRead + AsyncWrite + Unpin>(
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(peer.ip())
             {
-                let _ = log.send(format!("egress: denied {peer}: bad preamble, {error}"));
+                drop(log.send(format!("egress: denied {peer}: bad preamble, {error}")));
             }
-            let _ = stream.write_all(&[G::DENY]).await;
+            drop(stream.write_all(&[G::DENY]).await);
             return;
         }
     };
@@ -255,9 +255,9 @@ async fn handle_flow<G: Gateway, S: AsyncRead + AsyncWrite + Unpin>(
             .unwrap_or_else(PoisonError::into_inner)
             .insert(destination.ip())
         {
-            let _ = log.send(format!("egress: denied {destination}: unknown token"));
+            drop(log.send(format!("egress: denied {destination}: unknown token")));
         }
-        let _ = stream.write_all(&[G::DENY]).await;
+        drop(stream.write_all(&[G::DENY]).await);
         return;
     };
 
@@ -265,7 +265,7 @@ async fn handle_flow<G: Gateway, S: AsyncRead + AsyncWrite + Unpin>(
         Some(claimed) => match bind_name(&claimed, destination, &lookups).await {
             Ok(name) => name,
             Err(unbound) => {
-                let _ = log.send(format!("egress: {claimed} {unbound}"));
+                drop(log.send(format!("egress: {claimed} {unbound}")));
                 None
             }
         },
@@ -287,11 +287,11 @@ async fn handle_flow<G: Gateway, S: AsyncRead + AsyncWrite + Unpin>(
                 Some(name) => format!("{HTTPS_SCHEME}://{name} ({destination})"),
                 None => destination.to_string(),
             };
-            let _ = log.send(format!("egress: denied {machine} to {target}: {reason}"));
+            drop(log.send(format!("egress: denied {machine} to {target}: {reason}")));
             G::DENY
         }
     };
-    let _ = stream.write_all(&[reply]).await;
+    drop(stream.write_all(&[reply]).await);
 }
 
 /// Reads one flow's request from `stream` through the gateway `G`: asks it what the bytes so far
@@ -311,9 +311,9 @@ async fn read_flow<G: Gateway>(
             Decoded::Partial(len) => {
                 // The part the gateway asks for, and at least one byte, so a gateway that breaks
                 // `Partial`'s promise neither shrinks `bytes` nor gets asked forever.
-                let start = bytes.len();
-                bytes.resize(len.max(start + 1), 0);
-                stream.read_exact(&mut bytes[start..]).await?;
+                let mut rest = vec![0; len.saturating_sub(bytes.len()).max(1)];
+                stream.read_exact(&mut rest).await?;
+                bytes.extend(rest);
             }
         }
     }
@@ -539,8 +539,8 @@ mod tests {
 
     /// A gateway that breaks `Partial`'s promise once it holds 4 bytes: it asks for the 4 it
     /// has when they open with `=`, and for 2 when they open with `<`. It refuses 5 bytes, and
-    /// it panics on its eleventh question, so a `read_flow` that asks again and again fails
-    /// instead of hanging.
+    /// it errs differently on its eleventh question, so a `read_flow` that asks again and again
+    /// fails instead of hanging.
     struct StubbornGateway;
 
     impl Gateway for StubbornGateway {
@@ -551,7 +551,9 @@ mod tests {
 
         fn decode_flow(bytes: &[u8]) -> Result<Decoded, &'static str> {
             QUESTIONS.set(QUESTIONS.get() + 1);
-            assert!(QUESTIONS.get() <= 10, "read_flow asked more than ten times");
+            if QUESTIONS.get() > 10 {
+                return Err("read_flow asked more than ten times");
+            }
 
             match bytes {
                 [] | [b'=', _, _, _] => Ok(Decoded::Partial(4)),
@@ -611,11 +613,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_gateway_asking_for_no_more_bytes_still_ends_the_read() {
-        // Asked for the bytes it already holds, or for fewer, `read_flow` still ends with an
-        // error, without panicking or asking forever.
+        // Asked for the bytes it already holds, or for fewer, `read_flow` still ends with the
+        // gateway's refusal, without asking forever.
         for bytes in [b"====rest", b"<<<<rest"] {
             assert!(
-                read_flow::<StubbornGateway>(&mut &bytes[..]).await.is_err(),
+                matches!(
+                    read_flow::<StubbornGateway>(&mut &bytes[..]).await,
+                    Err(ReadError::Refused("refused"))
+                ),
                 "{}",
                 bytes.escape_ascii()
             );

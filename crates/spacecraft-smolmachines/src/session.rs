@@ -73,7 +73,7 @@ pub fn session(name: &str, command: &[String], tty: bool) -> Result<Command> {
 /// when `tty` is set. `command` passes through as argv, one argument per element, so nothing
 /// splits it on spaces; an empty `command` opens a login shell.
 #[must_use]
-pub fn session_args(name: &str, command: &[String], tty: bool) -> Vec<String> {
+pub(crate) fn session_args(name: &str, command: &[String], tty: bool) -> Vec<String> {
     let mut args = vec![
         MACHINE.into(),
         EXEC.into(),

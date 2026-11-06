@@ -2,6 +2,18 @@
 //!
 //! None of them boots a machine, so none needs an engine.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    reason = "Tests may panic and print diagnostics"
+)]
+
 use assert_cmd::Command;
 use assert_cmd::cargo::CommandCargoExt;
 
@@ -85,10 +97,11 @@ fn started_pid(stdout: &str) -> u32 {
 impl Drop for Runtime {
     fn drop(&mut self) {
         // `--force`, so a test that leaves a machine behind still stops its daemon.
-        let _ = self
-            .spacecraft()
-            .args(["daemon", "stop", "--force"])
-            .output();
+        drop(
+            self.spacecraft()
+                .args(["daemon", "stop", "--force"])
+                .output(),
+        );
 
         let pid_path = self.dir.path().join("daemon.pid");
 
@@ -96,9 +109,11 @@ impl Drop for Runtime {
             && let Err(TryLockError::WouldBlock) = pid_file.try_lock()
             && let Ok(pid) = std::fs::read_to_string(&pid_path)
         {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", pid.trim()])
-                .status();
+            drop(
+                std::process::Command::new("kill")
+                    .args(["-KILL", pid.trim()])
+                    .status(),
+            );
         }
     }
 }
@@ -159,11 +174,12 @@ fn repairs_stale_state() {
 
     let pid = runtime.start();
 
-    runtime.assert_running(pid);
     assert_eq!(
         std::fs::read_to_string(state.join("daemon.pid")).unwrap(),
         format!("{pid}\n")
     );
+    runtime.assert_running(pid);
+    drop(runtime);
 }
 
 #[test]
@@ -329,6 +345,7 @@ fn client_commands_create_no_state_directory() {
         .stderr("error: the daemon is not running\n");
 
     assert!(!missing.exists());
+    drop(runtime);
 }
 
 #[test]
@@ -405,4 +422,5 @@ exec "$@"
     // With its marker gone, `x` is no machine for the `Runtime` guard's `daemon stop --force`
     // to ask the engine about.
     std::fs::remove_file(&marker).unwrap();
+    drop(runtime);
 }

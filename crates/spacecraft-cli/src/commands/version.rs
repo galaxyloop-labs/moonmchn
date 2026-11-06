@@ -10,7 +10,7 @@ use anyhow::Context;
 /// # Errors
 ///
 /// Fails when writing to `out` fails.
-pub fn run(out: &mut impl Write) -> anyhow::Result<()> {
+pub(crate) fn run(out: &mut impl Write) -> anyhow::Result<()> {
     writeln!(out, "v{}", spacecraft::VERSION).context("failed to write version")
 }
 

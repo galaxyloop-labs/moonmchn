@@ -416,7 +416,7 @@ mod tests {
         assert!(toml::from_str::<Spec>(&without_name).is_err());
 
         // The egress lists are printed as the spec's own table, and read back.
-        let mut listed = pinned.clone();
+        let mut listed = pinned;
         listed.egress.allow = vec![Pattern::parse("api.github.com").unwrap()];
 
         let text = listed.to_toml().unwrap();

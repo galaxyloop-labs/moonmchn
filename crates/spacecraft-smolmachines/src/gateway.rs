@@ -35,6 +35,12 @@ const ADDRESS_V4_LEN: usize = 4;
 /// The length of an IPv6 destination's address, in bytes.
 const ADDRESS_V6_LEN: usize = 16;
 
+/// The length of the preamble up to the end of an IPv4 destination's opening length.
+const V4_FIXED_LEN: usize = HEAD_LEN + ADDRESS_V4_LEN + size_of::<u16>();
+
+/// The length of the preamble up to the end of an IPv6 destination's opening length.
+const V6_FIXED_LEN: usize = HEAD_LEN + ADDRESS_V6_LEN + size_of::<u16>();
+
 /// The most opening bytes the engine sends in a preamble: a longer length is refused before any
 /// of the bytes is asked for.
 const OPENING_BYTES_MAX: usize = 8192;
@@ -92,9 +98,7 @@ impl machine::Gateway for Gateway {
                 let Some((address, [high, low, opening @ ..])) =
                     rest.split_first_chunk::<ADDRESS_V4_LEN>()
                 else {
-                    return Ok(Decoded::Partial(
-                        HEAD_LEN + ADDRESS_V4_LEN + size_of::<u16>(),
-                    ));
+                    return Ok(Decoded::Partial(V4_FIXED_LEN));
                 };
                 (
                     IpAddr::from(*address),
@@ -106,9 +110,7 @@ impl machine::Gateway for Gateway {
                 let Some((address, [high, low, opening @ ..])) =
                     rest.split_first_chunk::<ADDRESS_V6_LEN>()
                 else {
-                    return Ok(Decoded::Partial(
-                        HEAD_LEN + ADDRESS_V6_LEN + size_of::<u16>(),
-                    ));
+                    return Ok(Decoded::Partial(V6_FIXED_LEN));
                 };
                 (
                     IpAddr::from(*address),
@@ -122,7 +124,10 @@ impl machine::Gateway for Gateway {
             return Err(PreambleError::Oversize(length));
         }
         let Some(opening) = opening.get(..usize::from(length)) else {
-            let opening_end = bytes.len() - opening.len() + usize::from(length);
+            let opening_end = bytes
+                .len()
+                .saturating_sub(opening.len())
+                .saturating_add(usize::from(length));
             return Ok(Decoded::Partial(opening_end));
         };
 

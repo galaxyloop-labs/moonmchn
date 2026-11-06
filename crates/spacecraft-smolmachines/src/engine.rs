@@ -163,7 +163,7 @@ fn within<T: Send + 'static>(
         let result = work();
         // Once `within` has given up, the receiver is gone and the send fails, so a late
         // result drops here.
-        let _ = sender.send(result);
+        drop(sender.send(result));
     });
 
     receiver.recv_timeout(timeout).ok()

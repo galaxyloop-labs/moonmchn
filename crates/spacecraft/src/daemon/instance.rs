@@ -78,7 +78,7 @@ pub(super) fn claim(dir: &Path) -> Result<File> {
 
     // Remove the socket a dead daemon left behind. One that survives this makes the
     // daemon's `bind` fail with the socket path.
-    let _ = std::fs::remove_file(socket_path(dir));
+    drop(std::fs::remove_file(socket_path(dir)));
 
     Ok(file)
 }
@@ -146,7 +146,7 @@ mod tests {
         file.unlock().unwrap();
         drop(file);
 
-        let _ = super::lock(lock_dir.path()).unwrap();
+        drop(super::lock(lock_dir.path()).unwrap());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use spacecraft::machine;
 use super::client;
 use crate::cli::MachineCommand;
 
-pub fn run(subcommand: MachineCommand, out: &mut impl Write) -> anyhow::Result<()> {
+pub(crate) fn run(subcommand: MachineCommand, out: &mut impl Write) -> anyhow::Result<()> {
     // Each arm writes its output and yields the write's `io::Result`; a failed request
     // returns early through `?` instead. A session arm writes nothing and returns `session`'s
     // result.

@@ -405,10 +405,10 @@ impl Machines {
             // `exec` gives up after `ANNOUNCE_TIMEOUT`, and a failed announcement never blocks
             // or fails the stop.
             // ponytail: silent, so add a daemon log line when a failed announcement bites.
-            let _ = machine.exec(
+            drop(machine.exec(
                 &broadcast(&name, &format!("spacecraft machine stop {name}")),
                 ANNOUNCE_TIMEOUT,
-            );
+            ));
 
             // A stopped machine loses its marker, and so does one the engine confirms gone:
             // that marker was stale, and the answer is as if there had been none.
@@ -504,6 +504,7 @@ impl Machines {
 
         if force || count == 0 {
             inflight.closed = true;
+            drop(inflight); // unlock before the log, so it does not block other requests
         }
 
         Ok(count)
@@ -569,10 +570,10 @@ impl Machines {
                     let _lock = lock;
                     let machine = E::Machine::attach(&name)?;
                     // Announced as in `stop`, with the daemon's reason.
-                    let _ = machine.exec(
+                    drop(machine.exec(
                         &broadcast(&name, "the spacecraft daemon is stopping"),
                         ANNOUNCE_TIMEOUT,
-                    );
+                    ));
                     destroy(machine, &marker, &egress, &name)?;
                     Ok(())
                 }
@@ -693,6 +694,7 @@ impl Machines {
         }
 
         inflight.names.insert(name.to_string(), state);
+        drop(inflight); // unlock before the log, so it does not block other requests
 
         Ok(InFlight {
             inflight: &self.inflight,
@@ -751,7 +753,7 @@ fn boot<E: Engine>(
 ) -> Result<MachineStart> {
     let machine = E::Machine::start(name, spec, binding).inspect_err(|e| {
         if !matches!(e, Error::MachineLeftover { .. }) {
-            let _ = remove_marker(marker);
+            drop(remove_marker(marker));
             egress.retire(name);
         }
     })?;

@@ -1,3 +1,9 @@
+#![allow(
+    dead_code,
+    unreachable_pub,
+    reason = "Each test binary compiles this module as its own crate root and uses a subset of its helpers"
+)]
+
 use spacecraft::config::EgressEndpoint;
 use spacecraft::daemon::api::Status;
 use spacecraft::daemon::client::Client;
@@ -88,7 +94,6 @@ impl machine::Gateway for FakeGateway {
 ///
 /// The command's script and the message's wording are the daemon's unit test's to check: an
 /// integration test checks only what the daemon decides, whether it announced and why.
-#[allow(dead_code)]
 pub fn assert_announced(name: &str, reason: &str) {
     // Collected first, so the lock is free again before an assertion can fail: a panic while
     // holding it would poison it for every other test in the binary.
@@ -107,7 +112,6 @@ pub fn assert_announced(name: &str, reason: &str) {
 
 /// Returns the bindings `start` was given for the machine `name`, in order. They are collected,
 /// so the lock is free again before a caller's assertion can fail.
-#[allow(dead_code)]
 pub fn bindings(name: &str) -> Vec<EgressEndpoint> {
     BINDINGS
         .lock()
@@ -227,7 +231,6 @@ pub fn state_dir() -> TempDir {
 
 /// Starts a daemon in `dir` on a thread of its own; `join` yields the daemon's result and
 /// output once it exits.
-#[allow(dead_code)]
 pub fn start_daemon(dir: PathBuf) -> JoinHandle<(Result<()>, Vec<u8>)> {
     start_daemon_with(dir, TEARDOWN_TIMEOUT)
 }
@@ -254,7 +257,6 @@ pub type DaemonThread = JoinHandle<(Result<()>, Vec<u8>)>;
 /// thread, so no daemon, and none of its open files, outlives its test. The tests run in
 /// parallel, and daemons left running would exhaust the open-file limit, 256 by default on
 /// macOS.
-#[allow(dead_code)]
 pub struct Daemon {
     /// The state directory, removed once the daemon has stopped.
     dir: TempDir,
@@ -262,7 +264,6 @@ pub struct Daemon {
     thread: Option<DaemonThread>,
 }
 
-#[allow(dead_code)]
 impl Daemon {
     /// The daemon's state directory.
     pub fn path(&self) -> &Path {
@@ -274,22 +275,20 @@ impl Drop for Daemon {
     fn drop(&mut self) {
         // The test may have shut its daemon down already, so both results are ignored: `drop`
         // runs while a failed test unwinds too, and a panic there would abort the run.
-        let _ = Client::new(self.path().to_path_buf()).shutdown(true);
+        drop(Client::new(self.path().to_path_buf()).shutdown(true));
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            drop(thread.join());
         }
     }
 }
 
 /// Starts a daemon in a fresh state directory and returns the daemon and a client.
-#[allow(dead_code)]
 pub fn daemon() -> (Daemon, Client) {
     daemon_in(state_dir())
 }
 
 /// Like `daemon`, in `dir`, which a test may have filled first, as an earlier daemon would have
 /// left it.
-#[allow(dead_code)]
 pub fn daemon_in(dir: TempDir) -> (Daemon, Client) {
     let (dir, client, thread) = launch(dir, TEARDOWN_TIMEOUT);
 
@@ -303,20 +302,17 @@ pub fn daemon_in(dir: TempDir) -> (Daemon, Client) {
 }
 
 /// Like `daemon`, and also returns the daemon's thread.
-#[allow(dead_code)]
 pub fn daemon_with_thread() -> (TempDir, Client, DaemonThread) {
     daemon_with_teardown(TEARDOWN_TIMEOUT)
 }
 
 /// Like `daemon_with_thread`, with `timeout` as the bound on each step of the daemon's teardown.
-#[allow(dead_code)]
 pub fn daemon_with_teardown(timeout: Duration) -> (TempDir, Client, DaemonThread) {
     launch(state_dir(), timeout)
 }
 
 /// Starts a daemon in `dir`, with `timeout` as the bound on each step of its teardown, and
 /// returns once it answers.
-#[allow(dead_code)]
 fn launch(dir: TempDir, timeout: Duration) -> (TempDir, Client, DaemonThread) {
     let thread = start_daemon_with(dir.path().to_path_buf(), timeout);
     let client = Client::new(dir.path().to_path_buf());
@@ -342,13 +338,11 @@ pub fn wait_for_status(client: &Client) -> spacecraft::Result<Status> {
     }
 }
 
-#[allow(dead_code)]
 pub fn marker(dir: &Path, name: &str) -> PathBuf {
     dir.join("machines").join(name)
 }
 
 /// Returns the `token` in the `[egress]` table of the marker of `name`, as written.
-#[allow(dead_code)]
 pub fn token_in(dir: &Path, name: &str) -> String {
     let marker: toml::Table = std::fs::read_to_string(marker(dir, name))
         .unwrap()
@@ -359,7 +353,6 @@ pub fn token_in(dir: &Path, name: &str) -> String {
 
 /// Returns the port the daemon in `dir` listens on for egress decisions, read from
 /// `egress/port`.
-#[allow(dead_code)]
 pub fn egress_port(dir: &Path) -> u16 {
     std::fs::read_to_string(dir.join("egress").join("port"))
         .unwrap()

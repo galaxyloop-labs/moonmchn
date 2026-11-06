@@ -70,7 +70,7 @@ impl HostMemory {
     /// represented as a `u32` MiB count. The current 8 GiB cap prevents this,
     /// but the conversion remains checked if the sizing policy changes.
     pub(super) fn suggested(self) -> Result<Mib> {
-        let memory = (self.total() / Self::GUEST_MEMORY_DIVISOR)
+        let memory = ByteSize::from_bytes(self.total().as_bytes() / Self::GUEST_MEMORY_DIVISOR)
             .clamp(Self::MIN_GUEST_MEMORY, Self::MAX_GUEST_MEMORY);
         Mib::try_from(memory).map_err(Error::GuestMemorySize)
     }

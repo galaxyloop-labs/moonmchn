@@ -1,5 +1,4 @@
 use std::num::TryFromIntError;
-use std::ops::Div;
 
 /// A byte quantity, independent of whether it describes memory or disk space.
 ///
@@ -11,7 +10,7 @@ use std::ops::Div;
 /// use spacecraft::ByteSize;
 ///
 /// let host_memory = ByteSize::checked_from_gib(16).unwrap();
-/// let guest_memory = host_memory / 4;
+/// let guest_memory = host_memory.checked_div(4).unwrap();
 /// assert_eq!(guest_memory.as_mib(), 4096);
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -68,19 +67,6 @@ impl ByteSize {
     /// Returns `None` if `divisor` is zero.
     pub fn checked_div(self, divisor: u64) -> Option<Self> {
         self.0.checked_div(divisor).map(Self)
-    }
-}
-
-impl Div<u64> for ByteSize {
-    type Output = Self;
-
-    /// Divides by a scalar, rounding down to whole bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `divisor` is zero.
-    fn div(self, divisor: u64) -> Self {
-        Self(self.0 / divisor)
     }
 }
 
@@ -189,7 +175,7 @@ mod tests {
     #[test]
     fn scalar_division_returns_a_size_and_rounds_down_to_bytes() {
         let memory = ByteSize::checked_from_gib(16).unwrap();
-        assert_eq!((memory / 4).as_gib(), 4);
+        assert_eq!(memory.checked_div(4).unwrap().as_gib(), 4);
 
         for (bytes, divisor, expected_bytes) in [
             (11, 4, 2),
@@ -200,7 +186,6 @@ mod tests {
         ] {
             let size = ByteSize::from_bytes(bytes);
             let expected = ByteSize::from_bytes(expected_bytes);
-            assert_eq!(size / divisor, expected);
             assert_eq!(size.checked_div(divisor), Some(expected));
         }
     }
@@ -209,12 +194,6 @@ mod tests {
     fn checked_division_rejects_zero_divisors() {
         assert_eq!(ByteSize::from_bytes(0).checked_div(0), None);
         assert_eq!(ByteSize::from_bytes(u64::MAX).checked_div(0), None);
-    }
-
-    #[test]
-    #[should_panic(expected = "divide by zero")]
-    fn scalar_division_panics_on_zero() {
-        let _ = ByteSize::from_bytes(1) / 0;
     }
 
     #[test]

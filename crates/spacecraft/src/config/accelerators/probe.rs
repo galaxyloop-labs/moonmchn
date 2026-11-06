@@ -45,8 +45,8 @@ pub(super) fn output(program: &str, args: &[&str], timeout: Duration) -> io::Res
     if result.is_err() {
         // Dropping Child does not stop or reap it. Clean up on every error,
         // including a missing stdout pipe or failure to start the reader.
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(child.kill());
+        drop(child.wait());
     }
     result
 }
@@ -73,9 +73,9 @@ fn collect_output(child: &mut Child, start: Instant, timeout: Duration) -> io::R
     thread::Builder::new().spawn(move || {
         let mut bytes = Vec::new();
         let result = stdout
-            .take(MAX_OUTPUT_SIZE.as_bytes() + 1)
+            .take(MAX_OUTPUT_SIZE.as_bytes().saturating_add(1))
             .read_to_end(&mut bytes);
-        let _ = sender.send(result.map(|_| bytes));
+        drop(sender.send(result.map(|_| bytes)));
     })?;
 
     wait_for_success(child, start, timeout)?;

@@ -185,9 +185,10 @@ impl Client {
 /// a missing `daemon.pid` counts as released. A `start` racing that exact instant could see the
 /// lock held; a sequential `stop && start` never does.
 fn wait_for_lock_release(dir: &Path, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
+    // A deadline too far to represent never arrives.
+    let deadline = Instant::now().checked_add(timeout);
     while instance::lock_held(dir)? {
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(Error::DaemonStopTimeout);
         }
         thread::sleep(SHUTDOWN_RETRY_TIMEOUT);
@@ -238,12 +239,16 @@ fn parse_reply<T: DeserializeOwned>(line: &str) -> Result<T> {
 }
 
 fn socket_error(error: io::Error) -> Error {
-    match error.kind() {
+    if matches!(
+        error.kind(),
         ErrorKind::NotFound
-        | ErrorKind::ConnectionRefused
-        | ErrorKind::ConnectionReset
-        | ErrorKind::BrokenPipe => Error::DaemonNotRunning,
-        _ => Error::DaemonTransport(error),
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset
+            | ErrorKind::BrokenPipe
+    ) {
+        Error::DaemonNotRunning
+    } else {
+        Error::DaemonTransport(error)
     }
 }
 
@@ -331,7 +336,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<()>();
         thread::spawn(move || {
             let _stream = listener.incoming().next().unwrap().unwrap();
-            let _ = rx.recv();
+            rx.recv().unwrap_err();
         });
 
         // A `machine_start` request is bounded by the operation timeout.
@@ -385,6 +390,9 @@ mod tests {
         // and fails with `DaemonNotRunning`.
         let result = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(result.is_err());
+
+        // The queued connections hold the backlog full until the client has failed.
+        drop(queued);
     }
 
     fn fake_daemon(reply: String) -> tempfile::TempDir {

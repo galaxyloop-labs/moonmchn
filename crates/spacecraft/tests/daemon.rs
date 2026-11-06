@@ -1,5 +1,17 @@
 //! End-to-end tests for the Spacecraft daemon library.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    reason = "Tests may panic and print diagnostics"
+)]
+
 use std::fs::File;
 use std::io::BufReader;
 use std::io::prelude::*;

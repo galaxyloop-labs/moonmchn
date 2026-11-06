@@ -1,6 +1,18 @@
 //! End-to-end tests for the daemon's egress decider: a gateway's question over TCP, answered from
 //! the lists of the machine whose token it carries.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    reason = "Tests may panic and print diagnostics"
+)]
+
 use spacecraft::config::{Egress, Pattern};
 use spacecraft::daemon::client::Client;
 use spacecraft::machine::Spec;

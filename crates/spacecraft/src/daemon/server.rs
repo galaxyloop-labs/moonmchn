@@ -165,7 +165,7 @@ pub fn serve_in<E: Engine>(
                     }
                     Err(e) => {
                         // One bad accept must never stop the daemon, so log it and retry.
-                        let _ = writeln!(out, "accept failed: {e}");
+                        drop(writeln!(out, "accept failed: {e}"));
                         tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
                     }
                 },
@@ -176,7 +176,7 @@ pub fn serve_in<E: Engine>(
                 // decider is gone, `next_line` yields `None`, which disables this branch for this
                 // turn of the loop.
                 Some(line) = next_line(&mut log_rx) => {
-                    let _ = writeln!(out, "{line}");
+                    drop(writeln!(out, "{line}"));
                 }
             }
         }
@@ -184,7 +184,7 @@ pub fn serve_in<E: Engine>(
         // A line the decider sent before the shutdown was noticed comes ahead of the teardown's
         // own.
         while let Some(line) = queued_line(&mut log_rx) {
-            let _ = writeln!(out, "{line}");
+            drop(writeln!(out, "{line}"));
         }
 
         // After a shutdown request and after `SIGTERM` alike.
@@ -271,10 +271,10 @@ async fn teardown<E: Engine>(
     out: &mut impl Write,
     timeout: Duration,
 ) {
-    let _ = machines.close(true);
+    drop(machines.close(true));
     drain(handlers, timeout, out).await;
     stop_machines::<E>(machines, timeout, out).await;
-    let _ = writeln!(out, "stopped");
+    drop(writeln!(out, "stopped"));
 }
 
 /// Waits up to `timeout` for every accepted request to finish.
@@ -292,11 +292,11 @@ async fn drain(handlers: &mut JoinSet<io::Result<()>>, timeout: Duration, out: &
     if drained.is_err() {
         // `len` counts the handlers not joined yet: the requests still running. `Duration`'s
         // `Debug` format prints `300s` or `200ms`.
-        let _ = writeln!(
+        drop(writeln!(
             out,
             "gave up waiting for {} request(s) after {timeout:?}",
             handlers.len()
-        );
+        ));
     }
 }
 
@@ -305,14 +305,14 @@ async fn stop_machines<E: Engine>(machines: &Machines, timeout: Duration, out: &
     match machines.stop_all::<E>(timeout).await {
         Ok(outcomes) => {
             for (name, outcome) in outcomes {
-                let _ = match outcome {
+                drop(match outcome {
                     Ok(()) => writeln!(out, "stopped machine {name}"),
                     Err(e) => writeln!(out, "failed to stop machine {name}: {e}"),
-                };
+                });
             }
         }
         Err(e) => {
-            let _ = writeln!(out, "failed to list machines: {e}");
+            drop(writeln!(out, "failed to list machines: {e}"));
         }
     }
 }

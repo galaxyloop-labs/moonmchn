@@ -9,7 +9,7 @@ use spacecraft::daemon;
 use super::client;
 use crate::cli::DaemonCommand;
 
-pub fn run(subcommand: DaemonCommand, out: &mut impl Write) -> anyhow::Result<()> {
+pub(crate) fn run(subcommand: DaemonCommand, out: &mut impl Write) -> anyhow::Result<()> {
     let line = match subcommand {
         DaemonCommand::Start { detached: true } => {
             return Ok(daemon::serve::<spacecraft_smolmachines::Engine>(out)?);

@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -223,23 +223,23 @@ struct Entry {
 
 /// Returns `bytes` as lowercase hex, two digits per byte.
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut output, b| {
-        let _ = write!(output, "{b:02x}");
-        output
-    })
+    bytes
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0xf])
+        .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+        .collect()
 }
 
 /// Decodes `text` into `out`, two hex digits per byte. Returns `None` when `text` holds
 /// anything else, or more or fewer digits than `out` needs.
 fn unhex(text: &str, out: &mut [u8]) -> Option<()> {
     // Every byte is checked first: `u8::from_str_radix` also takes a leading `+`.
-    if text.len() != out.len() * 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if text.len() != out.len().saturating_mul(2) || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
 
-    for (i, byte) in out.iter_mut().enumerate() {
-        let pair = text.get(i * 2..i * 2 + 2)?;
-        *byte = u8::from_str_radix(pair, 16).ok()?;
+    for (byte, pair) in out.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
+        *byte = u8::from_str_radix(str::from_utf8(pair).ok()?, 16).ok()?;
     }
 
     Some(())
