@@ -1,20 +1,20 @@
-# Spacecraft specification
+# Moon MCHN specification
 
-Detailed behavior of the Spacecraft library and CLI. [README.md](README.md) gives the
+Detailed behavior of the Moon MCHN library and CLI. [README.md](README.md) gives the
 overview and the commands.
 
 ## Workspace
 
-Command modules live in `crates/spacecraft-cli/src/commands/`, one per subcommand.
+Command modules live in `crates/moonmchn-cli/src/commands/`, one per subcommand.
 Each needs only the core library, except two that name the adapter crate: `daemon`,
-which names `spacecraft_smolmachines::Engine` to run the daemon for `--detached`,
-and `machine`, which names `spacecraft_smolmachines::session` to open `exec` and
+which names `moonmchn_smolmachines::Engine` to run the daemon for `--detached`,
+and `machine`, which names `moonmchn_smolmachines::session` to open `exec` and
 `shell` sessions. `machine` talks to the daemon through the core library's client.
 The adapter also resolves image digests, behind `Engine::image_digest`.
 
-`Config` stays in `spacecraft::config`; `Resources`, `Mount`, `Port`, and
+`Config` stays in `moonmchn::config`; `Resources`, `Mount`, `Port`, and
 `EgressEndpoint` are implemented in separate modules and remain available
-under their existing `spacecraft::config::*` paths. `spacecraft::Config` is also
+under their existing `moonmchn::config::*` paths. `moonmchn::Config` is also
 still re-exported at the crate root.
 
 The root `Cargo.toml` owns shared package metadata, lints, and release settings.
@@ -24,21 +24,21 @@ with test-only dependencies under `[dev-dependencies]`. All crates share one
 
 ## Setup
 
-`spacecraft setup` serializes host-aware machine defaults as TOML into
+`mchn setup` serializes host-aware machine defaults as TOML into
 `config.toml` in the configuration directory. It creates that directory with mode
 `0700`, and its missing parents with default permissions; an existing directory
 keeps its permissions.
 
 ### Directories
 
-Spacecraft resolves a configuration directory and a state directory, the latter
+Moon MCHN resolves a configuration directory and a state directory, the latter
 for the daemon. Each takes the first row whose variable is set:
 
 | Variable | Configuration | State |
 |---|---|---|
-| `SPACECRAFT_HOME` | `$SPACECRAFT_HOME/config.toml` | `$SPACECRAFT_HOME/` |
-| `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | `$XDG_CONFIG_HOME/spacecraft/config.toml` | `$XDG_STATE_HOME/spacecraft/` |
-| `HOME` | `$HOME/.config/spacecraft/config.toml` | `$HOME/.local/state/spacecraft/` |
+| `MOONMCHN_HOME` | `$MOONMCHN_HOME/config.toml` | `$MOONMCHN_HOME/` |
+| `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | `$XDG_CONFIG_HOME/moonmchn/config.toml` | `$XDG_STATE_HOME/moonmchn/` |
+| `HOME` | `$HOME/.config/moonmchn/config.toml` | `$HOME/.local/state/moonmchn/` |
 
 The XDG row applies per column: `XDG_CONFIG_HOME` picks the configuration
 directory, and `XDG_STATE_HOME` the state directory, independently.
@@ -49,7 +49,7 @@ directory, and `XDG_STATE_HOME` the state directory, independently.
   contain '..'`.
 - `HOME` is needed only for the last row; without it, commands that need a
   directory fail with `HOME is unset or empty`.
-- `SPACECRAFT_HOME` holds the configuration and the state in one flat directory.
+- `MOONMCHN_HOME` holds the configuration and the state in one flat directory.
   Two different values are two independent daemons. Both drive the host's one
   engine, so a machine name used under both collides there.
 
@@ -102,7 +102,7 @@ Driver-API support, not general CUDA Runtime/PyTorch support. Also, the Rust SDK
 1.29.1 retains `resources.cuda` and `resources.gpu_vram_mib` in `MachineConfig`
 but does not currently forward them as `--cuda` and `--gpu-vram` during local
 creation. Detection and serialization do not fix these upstream launch
-limitations; both are marked `FIXME` in the `spacecraft-smolmachines` adapter.
+limitations; both are marked `FIXME` in the `moonmchn-smolmachines` adapter.
 
 ### Existing configuration
 
@@ -110,12 +110,12 @@ If the destination already exists, setup fails without changing it. To regenerat
 host-aware defaults (discarding the file's current contents), run:
 
 ```sh
-spacecraft setup --force
+mchn setup --force
 ```
 
 ## Configuration format
 
-Spacecraft owns the `mounts`, `resources` and `egress` configuration schema. The
+Moon MCHN owns the `mounts`, `resources` and `egress` configuration schema. The
 unique machine name is supplied per machine rather than stored in global defaults.
 Mounts use an array of tables. Optional resource fields can be omitted to leave
 that choice to the backend. `memory` and `gpu_vram` use MiB; `storage` and
@@ -192,7 +192,7 @@ deny = ["upload.pypi.org"]
 `Config::default()` leaves settings unset; `Config::recommended()` selects the
 host-aware setup defaults. Deserialization rejects unknown keys to catch typos.
 
-The `spacecraft-smolmachines` adapter maps these settings to SDK fields, such as
+The `moonmchn-smolmachines` adapter maps these settings to SDK fields, such as
 `memory` to `memory_mib`, without changing their values or units. Other settings
 keep their SDK defaults. The SDK checks target-specific constraints when creating
 a machine; some settings are local-only or cloud-only. Conversion alone does not
@@ -205,7 +205,7 @@ machine SDK are confined to their respective crates.
 
 ### Machine backends
 
-`spacecraft::machine` is the extension point for engines, and the core crate never
+`moonmchn::machine` is the extension point for engines, and the core crate never
 names a machine SDK:
 
 - `Engine` names a backend's machine type (`type Machine: Machine`) and its network
@@ -229,7 +229,7 @@ names a machine SDK:
   host's own addresses. It does no I/O, save the system call `is_host_address` may
   make, one that sends nothing and never blocks, such as binding a socket.
 - `daemon::serve::<E>(out)` runs the daemon with engine `E`. The CLI chooses the
-  engine by type: `serve::<spacecraft_smolmachines::Engine>(out)`.
+  engine by type: `serve::<moonmchn_smolmachines::Engine>(out)`.
 
 A backend implements the three traits and passes its engine type to the daemon:
 
@@ -237,9 +237,9 @@ A backend implements the three traits and passes its engine type to the daemon:
 use std::net::IpAddr;
 use std::time::Duration;
 
-use spacecraft::config::EgressEndpoint;
-use spacecraft::image::{Digest, Image};
-use spacecraft::machine::{Decoded, Engine, Gateway, Machine, Spec, Status};
+use moonmchn::config::EgressEndpoint;
+use moonmchn::image::{Digest, Image};
+use moonmchn::machine::{Decoded, Engine, Gateway, Machine, Spec, Status};
 
 struct MyEngine;
 struct MyMachine;
@@ -249,16 +249,16 @@ impl Engine for MyEngine {
     type Machine = MyMachine;
     type Gateway = MyGateway;
 
-    fn image_digest(image: &Image) -> spacecraft::Result<Digest> { todo!() }
+    fn image_digest(image: &Image) -> moonmchn::Result<Digest> { todo!() }
 }
 
 impl Machine for MyMachine {
-    fn start(name: &str, spec: Spec, egress: &EgressEndpoint) -> spacecraft::Result<Self> { todo!() }
-    fn attach(name: &str) -> spacecraft::Result<Self> { todo!() }
-    fn status(&self) -> spacecraft::Result<Status> { todo!() }
-    fn resume(&self) -> spacecraft::Result<()> { todo!() }
-    fn exec(&self, command: &[String], timeout: Duration) -> spacecraft::Result<i32> { todo!() }
-    fn stop(self) -> spacecraft::Result<()> { todo!() }
+    fn start(name: &str, spec: Spec, egress: &EgressEndpoint) -> moonmchn::Result<Self> { todo!() }
+    fn attach(name: &str) -> moonmchn::Result<Self> { todo!() }
+    fn status(&self) -> moonmchn::Result<Status> { todo!() }
+    fn resume(&self) -> moonmchn::Result<()> { todo!() }
+    fn exec(&self, command: &[String], timeout: Duration) -> moonmchn::Result<i32> { todo!() }
+    fn stop(self) -> moonmchn::Result<()> { todo!() }
 }
 
 impl Gateway for MyGateway {
@@ -272,7 +272,7 @@ impl Gateway for MyGateway {
     fn is_host_address(ip: IpAddr) -> bool { todo!() }
 }
 
-spacecraft::daemon::serve::<MyEngine>(&mut std::io::stdout())?;
+moonmchn::daemon::serve::<MyEngine>(&mut std::io::stdout())?;
 ```
 
 The daemon calls `image_digest` and every `Machine` method on a blocking thread,
@@ -286,10 +286,10 @@ on this host.
 
 ### smolmachines adapter
 
-`spacecraft_smolmachines::Engine` and `spacecraft_smolmachines::Machine` implement
+`moonmchn_smolmachines::Engine` and `moonmchn_smolmachines::Machine` implement
 those traits with the SDK; the adapter's `Machine` wraps an SDK machine handle.
 
-`spacecraft_smolmachines::machine_config(spec, name)` replaces
+`moonmchn_smolmachines::machine_config(spec, name)` replaces
 `config.into_machine_config(name)`; it boots the spec's image pinned to its
 digest, with networking on, on virtio-net. The adapter's `start` creates the machine
 through the SDK, then starts it through the engine's own
@@ -297,7 +297,7 @@ through the SDK, then starts it through the engine's own
 with the token in the engine's environment, `SMOLVM_INTERCEPTOR_TOKEN`, and nowhere in
 its arguments: SDK 1.32.2 cannot pass that flag (smol-machines/smol#314). Its
 `Gateway` decodes the engine's request, the preamble (see [Egress](#egress)).
-`spacecraft_smolmachines::session(name, command, tty)`
+`moonmchn_smolmachines::session(name, command, tty)`
 returns the engine client's command line for an `exec` or `shell` session,
 which the CLI runs in place of itself. The adapter also exposes
 `resources(&resources)`, `mount(mount)`, `port(port)`, and
@@ -312,7 +312,7 @@ must point to the appropriate member crate rather than the repository root.
 
 ## Daemon
 
-`spacecraft daemon` runs on Linux and macOS.
+`mchn daemon` runs on Linux and macOS.
 
 ### Commands
 
@@ -329,11 +329,11 @@ must point to the appropriate member crate rather than the repository root.
 success. `status` asks a question, so "not running" is a failing answer. Any other
 error prints `error: <message>` on stderr and exits with 1.
 
-`start` launches a background copy of `spacecraft` and returns once that copy
+`start` launches a background copy of `mchn` and returns once that copy
 reports ready, waiting up to 5 seconds. Errors from the daemon's own startup are
 reported by `start`, and a daemon that never becomes ready is killed. The daemon
 leaves the terminal's session, so closing the terminal or pressing Ctrl-C leaves it
-running. It shows up in `ps` as `spacecraft daemon start --detached`; `start` passes
+running. It shows up in `ps` as `mchn daemon start --detached`; `start` passes
 that hidden flag to the background copy.
 
 `stop` refuses while the daemon holds any machine: every machine with a record,
@@ -350,7 +350,7 @@ since the daemon stops every machine before it exits.
 ### State directory
 
 The daemon keeps its files in the state directory (see
-[Directories](#directories)), `~/.local/state/spacecraft` by default.
+[Directories](#directories)), `~/.local/state/moonmchn` by default.
 
 The daemon creates the state directory when it starts, with its missing parents,
 `machines/` and `egress/`, each with mode `0700`. No other command creates
@@ -360,7 +360,7 @@ it, with root-owned sticky directories such as `/tmp` as the one exception;
 symlinks among them, such as macOS's `/var`, are resolved. The state directory
 itself must be a real directory, not a symlink, owned by you with mode `0700`.
 These checks hold for the daemon and for every command that finds the directory.
-Spacecraft never changes existing permissions.
+Moon MCHN never changes existing permissions.
 
 | Entry | Mode | Purpose |
 |---|---|---|
@@ -394,8 +394,8 @@ free: `daemon start` fails with
 machine depends on the port, so the daemon moves to a free one and writes it down.
 
 Unix socket paths are limited to 104 bytes on macOS and 108 on Linux.
-`~/.local/state/spacecraft/daemon.sock` takes about 50 bytes for a typical home,
-but a long `SPACECRAFT_HOME` or `XDG_STATE_HOME` can make `start` fail.
+`~/.local/state/moonmchn/daemon.sock` takes about 50 bytes for a typical home,
+but a long `MOONMCHN_HOME` or `XDG_STATE_HOME` can make `start` fail.
 
 ### Protocol
 
@@ -423,7 +423,7 @@ may hold up to 64 KiB.
 `nc -U` works as a client:
 
 ```sh
-printf '{"status":{}}\n' | nc -U ~/.local/state/spacecraft/daemon.sock
+printf '{"status":{}}\n' | nc -U ~/.local/state/moonmchn/daemon.sock
 # {"done":{"pid":12326,"version":"0.1.0"}}
 ```
 
@@ -442,7 +442,7 @@ daemon the same way:
    engine call, is left behind, and the daemon logs
    `gave up waiting for <n> request(s) after 300s`.
 3. It stops every machine. Before each stop it announces the stop inside the
-   machine, with the reason `the spacecraft daemon is stopping`, and ends its
+   machine, with the reason `the Moon MCHN daemon is stopping`, and ends its
    sessions (see [Lifecycle](#lifecycle)), which adds at most 5 seconds. It writes
    `stopped machine <name>` or `failed to stop machine <name>: <error>` to its log
    for each, or `failed to list machines: <error>` when it cannot read the
@@ -545,7 +545,7 @@ with the gateway at `100.96.0.1`, the same in every machine. Nothing reaches ano
 machine or the host, and no port is published. Any other address that `allow` admits is
 dialed from the host, by the host's routing table, a LAN or VPN address included.
 
-Spacecraft trusts the users of its host: one user per host, a private state directory,
+Moon MCHN trusts the users of its host: one user per host, a private state directory,
 and a hostile local user out of scope. The decider's port is where that line shows. The
 engine requires the decider on the host's loopback, so while no daemon holds the port,
 any local process can bind it. The window is a daemon killed outright with machines
@@ -577,7 +577,7 @@ The decider writes one line per event to the daemon's log, each starting `egress
 
 ## Machines
 
-`spacecraft machine` runs on Linux and macOS and needs a running daemon; it never
+`mchn machine` runs on Linux and macOS and needs a running daemon; it never
 starts one.
 
 ### Commands
@@ -591,7 +591,7 @@ starts one.
 | `machine status --extended x` | the block below | 0 |
 | `machine list` | one `x  running (pid N)` line per machine, sorted by name; nothing when there are none | 0 |
 | `machine exec x -- <command>…` | whatever the command prints; see [Sessions](#sessions) | the command's |
-| `machine shell x` | a login shell as `spacecraft`, in `/home/spacecraft` | the shell's |
+| `machine shell x` | a login shell as `moonmchn`, in `/home/moonmchn` | the shell's |
 | `machine status x`, `machine exec x` or `machine shell x` for an unknown name | `error: machine x not found` | 1 |
 | `machine start Alpha` | `error: invalid machine name "Alpha": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit` | 1 |
 | `machine start x`, with a bad pattern in `[egress]`, such as `allow = ["foo bar"]` or `deny = ["*"]` | `error: failed to parse …/config.toml as TOML: …`, naming the pattern and its rule: `invalid egress pattern "foo bar": labels contain letters, digits and '-', and cannot be empty` | 1 |
@@ -600,8 +600,8 @@ starts one.
 | `machine start x --image -` | `error: invalid image "-": an image on stdin is not supported; pass the archive's path` | 1 |
 | `machine start x --image ./rootfs/`, a directory | `error: invalid image "./rootfs/": a local image must be a docker save archive file` | 1 |
 | `machine start x --image ghcr.io/org/private:tag`, a private image | `error: failed to resolve image ghcr.io/org/private:tag: 403 Forbidden from https://ghcr.io/token: …`; see [Images](#images) | 1 |
-| `machine start x`, for a record the engine cannot report | ``error: the engine cannot report machine x; retry, or run `spacecraft machine stop x` to discard it`` | 1 |
-| `machine start x`, running or paused with a different configuration, `[egress]` included, or image | ``error: machine x is running with a different configuration; run `spacecraft machine stop x` to discard it, then start it again`` | 1 |
+| `machine start x`, for a record the engine cannot report | ``error: the engine cannot report machine x; retry, or run `mchn machine stop x` to discard it`` | 1 |
+| `machine start x`, running or paused with a different configuration, `[egress]` included, or image | ``error: machine x is running with a different configuration; run `mchn machine stop x` to discard it, then start it again`` | 1 |
 | `machine start`, `stop`, `exec` or `shell` on `x` while another client starts or stops `x` | `error: machine x is starting`, or `stopping` | 1 |
 | `machine exec x` without `--` and a command | clap's usage error | 2 |
 | `machine exec` or `machine shell`, when the machine stops during the session | the announcement, then the session ends; see [Lifecycle](#lifecycle) | 129 |
@@ -623,7 +623,7 @@ State:  running (pid 4242)
 mounts = []
 
 [image]
-name = "ghcr.io/galaxyloop-labs/spacecraft-images:default"
+name = "ghcr.io/galaxyloop-labs/moonmchn-images:default"
 digest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 
 [resources]
@@ -645,7 +645,7 @@ one configuration; the name and `--image` are the only per-machine inputs.
 ### Images
 
 `machine start x` boots `Image::default()`,
-`ghcr.io/galaxyloop-labs/spacecraft-images:default`, unless `--image` names another
+`ghcr.io/galaxyloop-labs/moonmchn-images:default`, unless `--image` names another
 in one of two forms:
 
 - A registry reference that starts with its registry host, such as
@@ -684,7 +684,7 @@ its registries file (see [Engine](#engine)).
 `machine exec x -- <command>…` and `machine shell x` ask the daemon for the
 machine, then replace the CLI with the engine's client, which carries the session:
 stdin, stdout and stderr pass through untouched, and the exit status is the
-command's. Both run as `spacecraft` in `/home/spacecraft`; `shell` opens a login
+command's. Both run as `moonmchn` in `/home/moonmchn`; `shell` opens a login
 shell, `sh -l`, with a terminal.
 
 - The command after `--` is argv end to end: nothing splits or quotes it, so
@@ -715,7 +715,7 @@ disks, and the next `machine start` boots a fresh one. `machine start` on a runn
 machine with the same configuration changes nothing and reports `already running`,
 so it is safe to repeat. With a different configuration it refuses: applying it
 needs a fresh boot, which would destroy the running machine. The engine may report
-a machine paused, although Spacecraft never pauses one: `machine start` resumes it
+a machine paused, although Moon MCHN never pauses one: `machine start` resumes it
 under the same configuration rule and reports `started`, where the engine can resume
 it. Under smolmachines it cannot, for a machine started with mediated egress, which
 every machine is: `machine start` reports the engine's refusal,
@@ -743,15 +743,15 @@ Before every stop, by `machine stop`, `daemon stop --force` or `SIGTERM`, the da
 announces it inside the machine. Every terminal in the guest shows:
 
 ```
-Broadcast message from spacecraft:
+Broadcast message from moonmchn:
 
-Machine x is stopping now: spacecraft machine stop x.
+Machine x is stopping now: mchn machine stop x.
 ```
 
-with `the spacecraft daemon is stopping` as the reason when the daemon itself stops.
+with `the Moon MCHN daemon is stopping` as the reason when the daemon itself stops.
 The daemon then hangs up every session, so each `machine exec` and `machine shell`
 ends with exit status 129 before the machine disappears, and the stop follows at
-once. The announcement is best effort: Spacecraft gives up on it after 5 seconds,
+once. The announcement is best effort: Moon MCHN gives up on it after 5 seconds,
 a failure is ignored, and it never blocks the stop.
 
 ### Records
@@ -799,8 +799,8 @@ before `daemon start`.
 
 `machine exec` and `machine shell` run the engine's client found by the same rule,
 the SDK's `engine_cli()`, in the CLI's own environment: `SMOLVM` when set, else a
-compatible `smolvm` on `PATH`, else the pinned engine. Both run as `spacecraft` in
-`/home/spacecraft`.
+compatible `smolvm` on `PATH`, else the pinned engine. Both run as `moonmchn` in
+`/home/moonmchn`.
 
 Every machine boots its image pinned to its recorded digest, with networking on, on
 virtio-net, and its flows judged by the decider (see [Egress](#egress)): the engine
@@ -819,14 +819,14 @@ Any image a machine boots must provide the following. The image is yours: built 
 published outside this repository, for `linux/arm64` and `linux/amd64`, and named by
 `--image`, or the official one, `Image::default()`.
 
-- A user `spacecraft` (uid 1000, home `/home/spacecraft`, shell `/bin/sh`), no
+- A user `moonmchn` (uid 1000, home `/home/moonmchn`, shell `/bin/sh`), no
   password, no `sudo`, no `doas`, no privileged groups.
 - `sh`, `printf` and `tee` on the image's PATH, for the announcement; `kill`, which
   ends the sessions, is `sh`'s builtin.
 - No ENTRYPOINT and no CMD, so the machine boots to the engine's agent and stays up.
   A long-lived one works too.
-- `USER spacecraft`, so an `exec` without `--user`, the announcement's included,
-  runs as `spacecraft`.
+- `USER moonmchn`, so an `exec` without `--user`, the announcement's included,
+  runs as `moonmchn`.
 - `/dev/pts` mounted, which the engine's guest init already does.
 
 ### Not implemented yet
@@ -910,7 +910,7 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
   reports the engine's refusal, and `machine stop`, then `machine start`, is the way
   out.
 - A home on a network filesystem may not support the daemon's socket and lock, or
-  the engine's cache. Point `SPACECRAFT_HOME` and `SMOLMACHINES_CACHE_DIR` at a
+  the engine's cache. Point `MOONMCHN_HOME` and `SMOLMACHINES_CACHE_DIR` at a
   local disk.
 - A slow first engine download can outlast the CLI's 5-minute wait. The daemon
   finishes the boot anyway, and `machine status <name>` shows the outcome.

@@ -17,7 +17,7 @@ fmt-check: ## Fail if any file is not formatted
 .PHONY: check
 check: ## Type-check the workspace, then the core library independently
 	$(CARGO) check --workspace --all-targets --all-features
-	$(CARGO) check -p spacecraft --all-targets --no-default-features
+	$(CARGO) check -p moonmchn --all-targets --no-default-features
 
 .PHONY: lint
 lint: ## Run clippy on every target; warnings are errors

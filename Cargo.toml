@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "crates/spacecraft",
-  "crates/spacecraft-smolmachines",
-  "crates/spacecraft-cli",
+  "crates/moonmchn",
+  "crates/moonmchn-smolmachines",
+  "crates/moonmchn-cli",
 ]
 resolver = "3"
 

@@ -798,6 +798,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "moonmchn"
+version = "0.1.0"
+dependencies = [
+ "close_fds",
+ "getrandom 0.4.3",
+ "idna",
+ "rustix",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "moonmchn-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "moonmchn",
+ "moonmchn-smolmachines",
+ "predicates",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "moonmchn-smolmachines"
+version = "0.1.0"
+dependencies = [
+ "moonmchn",
+ "reqwest",
+ "serde_json",
+ "smolmachines",
+ "tempfile",
+]
+
+[[package]]
 name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1363,49 +1406,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "spacecraft"
-version = "0.1.0"
-dependencies = [
- "close_fds",
- "getrandom 0.4.3",
- "idna",
- "rustix",
- "rustls",
- "serde",
- "serde_json",
- "sysinfo",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "spacecraft-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "predicates",
- "spacecraft",
- "spacecraft-smolmachines",
- "tempfile",
- "toml",
-]
-
-[[package]]
-name = "spacecraft-smolmachines"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde_json",
- "smolmachines",
- "spacecraft",
- "tempfile",
 ]
 
 [[package]]

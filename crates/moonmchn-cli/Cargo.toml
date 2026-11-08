@@ -1,0 +1,29 @@
+[package]
+name = "moonmchn-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Moon MCHN library and command-line interface"
+license.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "mchn"
+path = "src/main.rs"
+# The library owns API docs at target/doc/moonmchn; the CLI has --help.
+doc = false
+
+[dependencies]
+moonmchn = { version = "0.1.0", path = "../moonmchn" }
+moonmchn-smolmachines = { version = "0.1.0", path = "../moonmchn-smolmachines" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+toml = "1.1"
+
+[lints]
+workspace = true
