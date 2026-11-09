@@ -22,9 +22,12 @@ impl HostMemory {
     /// Use one quarter of total host RAM as the initial guest budget.
     const GUEST_MEMORY_DIVISOR: u64 = 4;
 
-    /// Detects total host RAM, failing if the host reports no memory.
+    /// Detects total host RAM, failing if sysinfo does not support the host or
+    /// the host reports no memory.
     pub(super) fn detect() -> Result<Self> {
-        let mut system = System::new();
+        // sysinfo fails here only on platforms it does not support; its error
+        // says no more than that, so it maps to the same variant as zero memory.
+        let mut system = System::new().map_err(|_| Error::HostMemory)?;
         system.refresh_memory();
         Self::from_size(ByteSize::from_bytes(system.total_memory()))
     }
