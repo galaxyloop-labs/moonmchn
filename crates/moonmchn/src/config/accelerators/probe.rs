@@ -219,11 +219,20 @@ mod tests {
 
     #[test]
     fn times_out_when_a_descendant_keeps_stdout_open() {
-        // The shell exits immediately, but the short-lived descendant holds
-        // the pipe open beyond the deadline and then exits on its own.
+        // The shell has exited before the deadline starts, however slowly it
+        // started, so only the reader can time out: the short-lived descendant
+        // holds the pipe open beyond the deadline and then exits on its own.
         let command = format!("sleep {} &", TEST_TIMEOUT.as_secs());
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", &command])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
         let start = Instant::now();
-        let error = output("/bin/sh", &["-c", &command], SHORT_TIMEOUT).unwrap_err();
+        let error = collect_output(&mut child, start, SHORT_TIMEOUT).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::TimedOut);
         assert_eq!(error.to_string(), "probe stdout timed out");
         assert!(start.elapsed() < COMPLETION_DEADLINE);
