@@ -1,0 +1,73 @@
+# On pull requests and pushes to `main`: `make ci` on every platform Moon MCHN runs on, inside
+# the Nix dev shell, so CI uses the toolchain and tools that `flake.lock` pins.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# A new push to a pull request cancels its running checks; every run on `main` finishes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: make ci (${{ matrix.platform.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.platform.runner }}
+    # A hung daemon test fails the job here; GitHub's default would hold the runner for six hours.
+    timeout-minutes: 30
+    env:
+      # Incremental artifacts speed up edit-and-rebuild loops; in CI they only grow the cache.
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      # The dev shell's Rust release, which follows `rust-version` in Cargo.toml.
+      - id: rust
+        run: |
+          release=$(nix develop --command rustc -vV | sed -n 's/^release: //p')
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+      # Crate sources and build artifacts. A new Rust release starts from an empty cache, since
+      # its artifacts share nothing with the old one's; a new `Cargo.lock` starts from the last
+      # cache of the same release. Pull requests read the cache, `main` writes it.
+      - id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: &cargo-cache |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ matrix.platform.system }}-rust-${{ steps.rust.outputs.release }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.platform.system }}-rust-${{ steps.rust.outputs.release }}-
+
+      - run: nix develop --command make ci
+
+      - if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *cargo-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}

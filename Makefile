@@ -1,6 +1,9 @@
 CARGO ?= cargo
 NIX ?= nix
 CLIFF ?= git-cliff
+ACTIONLINT ?= actionlint
+SHELLCHECK ?= shellcheck
+ZIZMOR ?= zizmor
 
 # The release version is [workspace.package] version in Cargo.toml. Cargo
 # cannot read a version from another file, so a VERSION file would be a second
@@ -25,6 +28,12 @@ fmt-check: ## Fail if any Rust file is not formatted
 .PHONY: nix-fmt-check
 nix-fmt-check: ## Fail if any Nix file is not formatted
 	$(NIX) fmt -- --ci
+
+.PHONY: workflows-check
+workflows-check: ## Lint the GitHub Actions workflows and their scripts; audit them and Dependabot's config
+	$(ACTIONLINT) -shellcheck=$(SHELLCHECK)
+	$(SHELLCHECK) .github/scripts/*.sh
+	$(ZIZMOR) --offline .
 
 .PHONY: check
 check: ## Type-check the workspace, then the core library independently
@@ -85,8 +94,12 @@ changelog: ## Regenerate CHANGELOG.md from git history (git-cliff, cliff.toml)
 		$(CLIFF) --tag "v$$version" --output CHANGELOG.md; \
 	fi
 
+# A default macOS terminal allows 256 open files per process. Under the higher
+# limit of CI runners and other shells, a test that runs out of descriptors on
+# a Mac would pass, so the whole run gets that soft limit.
 .PHONY: ci
-ci: fmt-check nix-fmt-check check lint test doc ## Everything CI runs
+ci: ## Everything CI runs, at the 256 open files of a default macOS terminal
+	ulimit -S -n 256 && $(MAKE) --no-print-directory fmt-check nix-fmt-check workflows-check check lint test doc
 
 .PHONY: clean
 clean: ## Remove build artifacts

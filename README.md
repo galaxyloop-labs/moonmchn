@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/galaxyloop-labs/moonmchn?include_prereleases&sort=semver)](https://github.com/galaxyloop-labs/moonmchn/releases)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/galaxyloop-labs/moonmchn/badge)](https://scorecard.dev/viewer/?uri=github.com/galaxyloop-labs/moonmchn)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-orange?logo=rust)](Cargo.toml)
+[![Rust 1.99+](https://img.shields.io/badge/rust-1.99%2B-orange?logo=rust)](Cargo.toml)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
 [![Platforms: macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](#quick-start)
 [![GitHub stars](https://img.shields.io/github/stars/galaxyloop-labs/moonmchn?style=flat)](https://github.com/galaxyloop-labs/moonmchn/stargazers)
@@ -69,12 +69,12 @@ The library is the product, and `mchn` is a thin wrapper over it. An application
 - `crates/moonmchn-cli`: the `mchn` binary.
 - `images/`: the official machine images, built with Nix. [images/README.md](images/README.md) covers building and publishing them.
 
-Development needs Nix with flakes. The Nix dev shell provides the rest: the Rust toolchain, `cargo-audit`, `cargo-deny`, `cargo-outdated` and `nixfmt`.
+Development needs Nix with flakes. If you use `direnv`, `cd`'ing in the directory enables the Nix flake automatically. Otherwise run `nix develop`.
 
 ```sh
 make help   # lists the targets
 make fmt    # formats the Rust and the Nix code
-make ci     # fmt-check, nix-fmt-check, check, lint, test and doc across the workspace
+make ci     # fmt-check, nix-fmt-check, workflows-check, check, lint, test and doc across the workspace
 make audit  # checks dependencies against the RustSec advisory database
 make deny   # checks dependency licenses, bans, advisories and sources
 ```

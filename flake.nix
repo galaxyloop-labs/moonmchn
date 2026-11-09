@@ -12,6 +12,11 @@
   outputs =
     { nixpkgs, rust-overlay, ... }:
     let
+      # The Rust that `rust-version` in Cargo.toml declares, at its newest patch release, so every
+      # build runs the oldest Rust the crates claim to support. A version newer than the locked
+      # rust-overlay knows needs `nix flake update rust-overlay`.
+      rustVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.rust-version;
+
       systems = [
         "aarch64-darwin"
         "x86_64-linux"
@@ -36,8 +41,9 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = [
-            (pkgs.rust-bin.stable.latest.default.override {
-              extensions = [
+            (pkgs.rust-bin.fromRustupToolchain {
+              channel = rustVersion;
+              components = [
                 "rust-src"
                 "rust-analyzer"
                 "clippy"
@@ -52,35 +58,16 @@
             pkgs.cargo-flamegraph
             pkgs.git-cliff # Changelog generator
 
+            # GitHub Actions: actionlint runs shellcheck on every `run:` block.
+            pkgs.actionlint
+            pkgs.shellcheck
+            pkgs.zizmor # Security audit of the workflows
+
             # The same formatter `nix fmt` runs, at this lock's version.
             pkgs.nixfmt
           ];
 
           env.RUST_BACKTRACE = "1";
-
-          shellHook = ''
-            # Daily `cargo clean`.
-            # Marker lives under .git/ so it survives the clean itself;
-            # `find -mtime +0` is the portable (BSD/GNU) way to test "older
-            # than 24h" without juggling `stat` flag differences.
-            # Cargo.toml: `code --init` loads this shell before `cargo init` runs.
-            if [ -d "$PWD/.git" ] && [ -f "$PWD/Cargo.toml" ]; then
-              _cargo_clean_marker="$PWD/.git/.cargo-clean-daily"
-              # `code` opens three panes at once and each one evaluates this
-              # hook. mkdir is atomic: one pane takes the lock, the rest skip.
-              # A lock older than a day was left by an interrupted clean.
-              find "$_cargo_clean_marker.lock" -maxdepth 0 -mtime +0 -exec rmdir {} \; 2>/dev/null
-              if mkdir "$_cargo_clean_marker.lock" 2>/dev/null; then
-                if [ ! -f "$_cargo_clean_marker" ] || [ -n "$(find "$_cargo_clean_marker" -mtime +0 2>/dev/null)" ]; then
-                  echo "Running daily 'cargo clean' (target/ hasn't been reset in >24h)..."
-                  cargo clean
-                  touch "$_cargo_clean_marker"
-                fi
-                rmdir "$_cargo_clean_marker.lock"
-              fi
-              unset _cargo_clean_marker
-            fi
-          '';
         };
       });
     };

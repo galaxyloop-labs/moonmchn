@@ -1,0 +1,7 @@
+# zizmor's settings for `make workflows-check`. https://docs.zizmor.sh/configuration/
+rules:
+  # The `$/` syntax for same-repository `uses:` (GitHub, 2026-07-30) fails actionlint 1.7.12, and
+  # a reusable workflow called with `./` already comes from the caller's own commit. Enable this
+  # audit and switch to `$/` once the actionlint in flake.lock accepts it.
+  self-repository:
+    disable: true
