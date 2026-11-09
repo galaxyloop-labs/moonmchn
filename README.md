@@ -58,6 +58,13 @@ Not yet:
 
 [Known limitations](SPEC.md#known-limitations) lists the rest.
 
+## How it compares
+
+Moon MCHN is made for one developer's own Mac or Linux machine, with two choices at its core, both on the [roadmap](ROADMAP.md):
+
+- **Two walls.** The microVM, and the host process that runs it, confined by the host kernel: Seatbelt on macOS, Landlock on Linux.
+- **Machines you can rebuild.** Toolchains come from Nix packs pinned in the machine's spec, so the same spec gives the same machine.
+
 ## Use it as a library
 
 The library is the product, and `mchn` is a thin wrapper over it. An application can use the `moonmchn` crate to write configuration, run the daemon and drive machines, with any engine that implements its `Engine` and `Machine` traits. [Library](SPEC.md#library) and [Machine backends](SPEC.md#machine-backends) describe the API.
