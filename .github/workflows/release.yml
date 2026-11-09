@@ -1,0 +1,183 @@
+# On a `v*.*.*` tag: builds `mchn` for every platform, attests the archives, creates the GitHub
+# Release, and publishes the crates to crates.io through Trusted Publishing, so no registry token
+# sits in the repository's secrets. The official images publish on their own, from images-publish.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag names Cargo.toml's version, sits on `main`, and has a changelog section. Everything
+  # else waits for this, since a crates.io release cannot be taken back.
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tag names the workspace version
+        run: |
+          version=$(make --no-print-directory --silent version)
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::tag $TAG does not match version $version in Cargo.toml"
+            exit 1
+          fi
+        env:
+          TAG: ${{ github.ref_name }}
+
+      - name: The tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG is not on main"
+            exit 1
+          fi
+        env:
+          TAG: ${{ github.ref_name }}
+
+      - name: The changelog has a section for the tag
+        run: |
+          if ! grep -q "^## $TAG - " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $TAG; run make changelog"
+            exit 1
+          fi
+        env:
+          TAG: ${{ github.ref_name }}
+
+  # `nix build .#mchn`, which `flake.lock` pins to the dev shell's Rust. The flake keeps /nix/store
+  # out of the binary; the check below fails the job if one reference slips in.
+  binaries:
+    name: mchn (${{ matrix.platform.system }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      - run: nix build .#mchn --print-build-logs
+
+      - name: The binary runs without Nix
+        run: |
+          case "$SYSTEM" in
+            *-linux)
+              if readelf -l result/bin/mchn | grep -q INTERP; then
+                echo "::error::mchn is dynamically linked"
+                exit 1
+              fi
+              ;;
+            *-darwin)
+              if otool -L result/bin/mchn | grep -q /nix/store; then
+                echo "::error::mchn links a library from /nix/store"
+                exit 1
+              fi
+              ;;
+          esac
+        env:
+          SYSTEM: ${{ matrix.platform.system }}
+
+      - id: archive
+        run: |
+          name="mchn-$TAG-$SYSTEM"
+          mkdir "$name"
+          cp result/bin/mchn LICENSE README.md "$name"
+          tar -czf "$name.tar.gz" "$name"
+          echo "path=$name.tar.gz" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.ref_name }}
+          SYSTEM: ${{ matrix.platform.system }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mchn-${{ matrix.platform.system }}
+          path: ${{ steps.archive.outputs.path }}
+          if-no-files-found: error
+
+  # Attests the archives and their checksums, then creates the release with the changelog
+  # section as its notes. Verify a download with `gh attestation verify <file> --repo
+  # galaxyloop-labs/moonmchn`.
+  release:
+    needs: binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mchn-*
+          path: dist
+          merge-multiple: true
+
+      - run: cd dist && sha256sum -- *.tar.gz > SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Create the release
+        run: |
+          awk -v tag="$TAG" '$1 == "##" { in_section = ($2 == tag); next } in_section' CHANGELOG.md > notes.md
+          if [[ ! -s notes.md ]]; then
+            echo "::error::CHANGELOG.md has an empty section for $TAG"
+            exit 1
+          fi
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes-file notes.md
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+
+  # Waits for the binaries, so a platform that fails to build stops the release before the
+  # irreversible step. Trusted Publishing exchanges this job's OIDC (OpenID Connect) identity for
+  # a short-lived crates.io token; the crates.io side lists this repository, this workflow file
+  # and the `release` environment per crate.
+  publish:
+    needs: [check, binaries]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      # Publishes in dependency order and waits for each crate to reach the index.
+      - run: nix develop --command cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

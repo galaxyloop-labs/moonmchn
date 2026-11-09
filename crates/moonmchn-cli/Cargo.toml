@@ -6,6 +6,10 @@ rust-version.workspace = true
 description = "Moon MCHN library and command-line interface"
 license.workspace = true
 readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["microvm", "sandbox", "ai-agents", "cli", "dev-tool"]
+categories = ["command-line-utilities", "virtualization"]
 
 [[bin]]
 name = "mchn"

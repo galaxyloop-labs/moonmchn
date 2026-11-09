@@ -6,6 +6,10 @@ rust-version.workspace = true
 description = "Moon MCHN configuration and application library"
 license.workspace = true
 readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["microvm", "sandbox", "ai-agents", "virtualization", "dev-tool"]
+categories = ["virtualization"]
 
 [dependencies]
 idna = "1"

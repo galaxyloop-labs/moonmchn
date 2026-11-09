@@ -16,6 +16,10 @@ VERSION = $(shell awk -F'"' '/^\[/ { in_section = ($$0 ~ /^\[workspace\.package\
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
+.PHONY: version
+version: ## Print the release version from Cargo.toml
+	@echo '$(VERSION)'
+
 .PHONY: fmt
 fmt: ## Format all code, Rust and Nix
 	$(CARGO) fmt --all

@@ -6,6 +6,10 @@ rust-version.workspace = true
 description = "smolmachines backend adapter for Moon MCHN"
 license.workspace = true
 readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["microvm", "sandbox", "ai-agents", "smolmachines", "dev-tool"]
+categories = ["virtualization"]
 
 [dependencies]
 moonmchn = { version = "0.1.0", path = "../moonmchn" }

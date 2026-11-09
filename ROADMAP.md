@@ -21,5 +21,5 @@ Read [CHANGELOG.md](CHANGELOG.md) for what was already built.
 - **Volumes:** storage that outlives a machine.
 - **Backups** of a machine's data.
 - **Services:** Sidekick, pre-built VMs with a single running service (e.g. Postgres, Redis, etc...).
-- **VPN:** a private channel between the `mchn` CLI and its daemon, ready for a daemon on another host.
+- **VPN:** a private, encrypted channel between the `mchn` CLI and its daemon, on the same host and, later, to a daemon on another host.
 - **Nix binary cache** for faster package installs.

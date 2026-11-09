@@ -43,6 +43,16 @@ mchn stop dev              # stops it and discards its disk
 mchn --help                # shows all the commands
 ```
 
+## Verify a release
+
+Each [release](https://github.com/galaxyloop-labs/moonmchn/releases) carries an `mchn` archive per platform and a `SHA256SUMS` file, all with a signed build attestation that names this repository and the workflow that built them:
+
+```sh
+gh attestation verify mchn-v0.1.0-aarch64-darwin.tar.gz --repo galaxyloop-labs/moonmchn
+```
+
+The crates on crates.io publish from the same workflow through Trusted Publishing.
+
 ## What it protects, and what it does not yet
 
 Moon MCHN keeps out of a machine's reach:

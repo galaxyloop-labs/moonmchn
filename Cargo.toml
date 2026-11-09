@@ -12,6 +12,8 @@ edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/galaxyloop-labs/moonmchn"
+homepage = "https://github.com/galaxyloop-labs/moonmchn"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
