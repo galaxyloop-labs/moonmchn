@@ -1,0 +1,73 @@
+# git-cliff configuration, driven by `make changelog`.
+# Docs: https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """
+# Moon MCHN Changelog\
+"""
+# One section per release, newest first; each section opens with a blank line.
+# Commits that no tag covers land in `unreleased`; `make changelog` names them
+# after Cargo.toml's version while that version has no tag.
+#
+# A release is dated by its newest commit: git-cliff dates an untagged release
+# with the current time, which would change the file on every run.
+#
+# Groups come out of group_by in alphabetical order. The `<!-- N -->` prefix
+# set in commit_parsers fixes their order; striptags removes it again.
+body = """
+{% if version or commits %}
+{% if version %}\
+{% set newest = commits | sort(attribute="committer.timestamp") | last %}\
+## {{ version }} - {{ newest.committer.timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## unreleased
+{% endif %}\
+{% for group, group_commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+
+{% for commit in group_commits %}\
+- {% if commit.breaking %}**BREAKING** {% endif %}\
+{% if commit.scope %}**{{ commit.scope }}**: {% endif %}\
+{{ commit.message | split(pat="\n") | first | trim | upper_first }}\
+{% if commit.remote.pr_number %} [#{{ commit.remote.pr_number }}](https://github.com/galaxyloop-labs/moonmchn/pull/{{ commit.remote.pr_number }}){% endif %}\
+{% if commit.remote.username %} (@{{ commit.remote.username }}){% endif %}
+{% endfor %}\
+{% endfor %}\
+{% endif %}\
+"""
+trim = false
+
+# Resolves each commit to its GitHub username and PR. The token comes from
+# GITHUB_TOKEN, which `make changelog` fills from `gh auth token`.
+[remote.github]
+owner = "galaxyloop-labs"
+repo = "moonmchn"
+
+[git]
+conventional_commits = true
+# Commits that do not follow Conventional Commits still get an entry.
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+filter_commits = false
+# Only vMAJOR.MINOR.PATCH tags are releases.
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+sort_commits = "newest"
+
+# The PR number comes from GitHub; drop the copy a squash merge leaves in the subject.
+commit_preprocessors = [
+  { pattern = '\s*\(#[0-9]+\)$', replace = "" },
+]
+
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+  { message = "^docs?", group = "<!-- 4 -->Documentation" },
+  { message = "^test", group = "<!-- 5 -->Tests" },
+  { message = "^(build|ci)", group = "<!-- 6 -->Build" },
+  { message = "^style", group = "<!-- 7 -->Style" },
+  { message = "^chore", group = "<!-- 8 -->Chores" },
+  { message = ".*", group = "<!-- 9 -->Other" },
+]

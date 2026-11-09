@@ -47,6 +47,7 @@
             pkgs.cargo-outdated
             pkgs.cargo-expand
             pkgs.cargo-flamegraph
+            pkgs.git-cliff # Changelog generator
           ];
 
           env.RUST_BACKTRACE = "1";

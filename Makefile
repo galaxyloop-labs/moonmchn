@@ -1,4 +1,10 @@
 CARGO ?= cargo
+CLIFF ?= git-cliff
+
+# The release version is [workspace.package] version in Cargo.toml. Cargo
+# cannot read a version from another file, so a VERSION file would be a second
+# copy. Recursive assignment: awk runs only for targets that use it.
+VERSION = $(shell awk -F'"' '/^\[/ { in_section = ($$0 ~ /^\[workspace\.package\]/) } in_section && /^version[ \t]*=/ { print $$2; exit }' Cargo.toml)
 
 .DEFAULT_GOAL := help
 
@@ -58,6 +64,20 @@ deny: ## Check licenses, bans, advisories and sources (deny.toml)
 .PHONY: outdated
 outdated: ## List dependencies with newer versions available
 	$(CARGO) outdated
+
+.PHONY: changelog
+changelog: ## Regenerate CHANGELOG.md from git history (git-cliff, cliff.toml)
+	@version='$(VERSION)'; \
+	if ! printf '%s' "$$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+		echo 'changelog: no MAJOR.MINOR.PATCH version under [workspace.package] in Cargo.toml' >&2; \
+		exit 1; \
+	fi; \
+	export GITHUB_TOKEN="$${GITHUB_TOKEN:-$$(gh auth token 2>/dev/null)}"; \
+	if git rev-parse -q --verify "refs/tags/v$$version" >/dev/null; then \
+		$(CLIFF) --output CHANGELOG.md; \
+	else \
+		$(CLIFF) --tag "v$$version" --output CHANGELOG.md; \
+	fi
 
 .PHONY: ci
 ci: fmt-check check lint test doc ## Everything CI runs
