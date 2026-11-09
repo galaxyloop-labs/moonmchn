@@ -30,6 +30,9 @@
         );
     in
     {
+      # `nix fmt` formats every `.nix` file Git tracks; `nix fmt -- --ci` fails on one that needs it.
+      formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
+
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = [
@@ -48,6 +51,9 @@
             pkgs.cargo-expand
             pkgs.cargo-flamegraph
             pkgs.git-cliff # Changelog generator
+
+            # The same formatter `nix fmt` runs, at this lock's version.
+            pkgs.nixfmt
           ];
 
           env.RUST_BACKTRACE = "1";

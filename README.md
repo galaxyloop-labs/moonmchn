@@ -67,12 +67,14 @@ The library is the product, and `mchn` is a thin wrapper over it. An application
 - `crates/moonmchn`: the library, with configuration, setup, the daemon, and the `Engine` and `Machine` traits.
 - `crates/moonmchn-smolmachines`: the engine adapter for smolmachines.
 - `crates/moonmchn-cli`: the `mchn` binary.
+- `images/`: the official machine images, built with Nix. [images/README.md](images/README.md) covers building and publishing them.
 
-Development needs the Rust toolchain plus `cargo-audit`, `cargo-deny` and `cargo-outdated`, all provided by the Nix dev shell.
+Development needs Nix with flakes. The Nix dev shell provides the rest: the Rust toolchain, `cargo-audit`, `cargo-deny`, `cargo-outdated` and `nixfmt`.
 
 ```sh
 make help   # lists the targets
-make ci     # fmt-check, check, lint, test and doc across the workspace
+make fmt    # formats the Rust and the Nix code
+make ci     # fmt-check, nix-fmt-check, check, lint, test and doc across the workspace
 make audit  # checks dependencies against the RustSec advisory database
 make deny   # checks dependency licenses, bans, advisories and sources
 ```

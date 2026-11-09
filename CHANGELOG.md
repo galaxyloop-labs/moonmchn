@@ -4,6 +4,7 @@
 
 ### Features
 
+- Default image builder
 - **BREAKING** Unnest `mchn machine *` commands at root (@jodosha)
 - **BREAKING** Spacecraft -> Moon MCHN (@jodosha)
 - Judge every guest flow against the [egress] lists (@jodosha)

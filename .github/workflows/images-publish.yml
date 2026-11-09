@@ -1,0 +1,124 @@
+# On `main`: builds every image on both platforms, smoke-tests it, then signs and publishes each
+# one on its own. An image whose content is already published is left alone, so a push that
+# changes one image republishes that image alone.
+name: images-publish
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - images/**
+      - .github/workflows/images-*.yml
+      - .github/scripts/images-*.sh
+  workflow_dispatch:
+
+# One publish at a time, so two runs never move the same tag in turn.
+concurrency:
+  group: images-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  names:
+    runs-on: ubuntu-24.04
+    outputs:
+      names: ${{ steps.names.outputs.names }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      - id: names
+        run: echo "names=$(.github/scripts/images-names.sh)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: names
+    uses: ./.github/workflows/images-build.yml
+    with:
+      names: ${{ needs.names.outputs.names }}
+      upload: true
+
+  # Runs even when some builds failed: each image publishes once both its platforms passed.
+  publish:
+    name: publish ${{ matrix.name }}
+    needs: [names, build]
+    if: ${{ !cancelled() && needs.names.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.names.outputs.names) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-${{ matrix.name }}-*
+          path: archives
+          merge-multiple: true
+
+      - id: image
+        run: |
+          systems=$(nix eval --json ./images#packages --apply builtins.attrNames | jq -r '.[]')
+          for system in $systems; do
+            if [[ ! -f "archives/image-$NAME-$system.tar.gz" ]]; then
+              echo "::error::$NAME did not build and pass on $system; not published"
+              exit 1
+            fi
+          done
+          image=$(nix eval --json "./images#lib.images.$NAME")
+          {
+            echo "repository=$(jq -r .repository <<<"$image")"
+            echo "tag=$(jq -r .tag <<<"$image")"
+            echo "aliases=$(jq -r '.aliases | join(" ")' <<<"$image")"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          NAME: ${{ matrix.name }}
+
+      # The publishing tools, at the images flake's own nixpkgs revision.
+      - run: |
+          for tool in skopeo crane cosign; do
+            echo "$(nix build --no-link --print-out-paths --inputs-from ./images "nixpkgs#$tool^out")/bin" >> "$GITHUB_PATH"
+          done
+
+      - run: crane auth login ghcr.io --username "$ACTOR" --password-stdin <<<"$TOKEN"
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: publish
+        run: |
+          alias_flags=()
+          for alias in $ALIASES; do alias_flags+=(--alias "$alias"); done
+          .github/scripts/images-publish.sh \
+            --repository "$REPOSITORY" \
+            --tag "$TAG" \
+            --immutable "$TAG-$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}" \
+            "${alias_flags[@]}" \
+            --sign \
+            archives/*.tar.gz
+        env:
+          REPOSITORY: ${{ steps.image.outputs.repository }}
+          TAG: ${{ steps.image.outputs.tag }}
+          ALIASES: ${{ steps.image.outputs.aliases }}
+
+      - if: steps.publish.outputs.digest != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.repository }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true

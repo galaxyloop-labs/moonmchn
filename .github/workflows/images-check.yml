@@ -1,0 +1,38 @@
+# On pull requests: the Nix code is formatted, and every image builds and keeps the guest
+# contract on both platforms.
+name: images-check
+
+on:
+  pull_request:
+    paths:
+      - images/**
+      - flake.nix
+      - flake.lock
+      - .github/workflows/images-*.yml
+      - .github/scripts/images-*.sh
+
+permissions:
+  contents: read
+
+jobs:
+  names:
+    runs-on: ubuntu-24.04
+    outputs:
+      names: ${{ steps.names.outputs.names }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      - run: nix fmt -- --ci
+
+      - id: names
+        run: echo "names=$(.github/scripts/images-names.sh)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: names
+    uses: ./.github/workflows/images-build.yml
+    with:
+      names: ${{ needs.names.outputs.names }}

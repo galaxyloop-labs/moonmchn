@@ -1,2 +1,8 @@
 /target
 .direnv/
+keys/
+*.qcow2
+result
+result-*
+*.tar
+*.tar.gz

@@ -1,0 +1,85 @@
+# Builds and smoke-tests images, one job per image and platform, so one failure stops no other.
+# Called by images-check, images-publish and images-bump.
+name: images-build
+
+on:
+  workflow_call:
+    inputs:
+      names:
+        description: JSON array of the images to build, as images-names.sh prints them.
+        required: true
+        type: string
+      bumped:
+        description: Build each image at the revision of the bumped lock in the images-flake-lock artifact.
+        default: false
+        type: boolean
+      upload:
+        description: Upload each archive as the artifact image-<name>-<system>.
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }} (${{ matrix.platform.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(inputs.names) }}
+        platform:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      - if: inputs.bumped
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: images-flake-lock
+          path: images
+
+      - if: inputs.bumped
+        run: .github/scripts/images-revisions.sh pin "$NAME"
+        env:
+          NAME: ${{ matrix.name }}
+
+      - run: nix build "./images#packages.$SYSTEM.$NAME" --out-link result --print-build-logs
+        env:
+          SYSTEM: ${{ matrix.platform.system }}
+          NAME: ${{ matrix.name }}
+
+      - run: .github/scripts/images-smoke-test.sh result
+
+      - if: inputs.upload
+        run: cp --dereference result "image-$NAME-$SYSTEM.tar.gz"
+        env:
+          SYSTEM: ${{ matrix.platform.system }}
+          NAME: ${{ matrix.name }}
+
+      - if: inputs.upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.name }}-${{ matrix.platform.system }}
+          path: image-${{ matrix.name }}-${{ matrix.platform.system }}.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+      # A marker per image and platform that built and passed, which images-bump reads.
+      - run: echo "$NAME $SYSTEM" > passed
+        env:
+          SYSTEM: ${{ matrix.platform.system }}
+          NAME: ${{ matrix.name }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: passed-${{ matrix.name }}-${{ matrix.platform.system }}
+          path: passed
+          retention-days: 1

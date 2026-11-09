@@ -1,4 +1,5 @@
 CARGO ?= cargo
+NIX ?= nix
 CLIFF ?= git-cliff
 
 # The release version is [workspace.package] version in Cargo.toml. Cargo
@@ -13,12 +14,17 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: fmt
-fmt: ## Format all code
+fmt: ## Format all code, Rust and Nix
 	$(CARGO) fmt --all
+	$(NIX) fmt
 
 .PHONY: fmt-check
-fmt-check: ## Fail if any file is not formatted
+fmt-check: ## Fail if any Rust file is not formatted
 	$(CARGO) fmt --all --check
+
+.PHONY: nix-fmt-check
+nix-fmt-check: ## Fail if any Nix file is not formatted
+	$(NIX) fmt -- --ci
 
 .PHONY: check
 check: ## Type-check the workspace, then the core library independently
@@ -80,7 +86,7 @@ changelog: ## Regenerate CHANGELOG.md from git history (git-cliff, cliff.toml)
 	fi
 
 .PHONY: ci
-ci: fmt-check check lint test doc ## Everything CI runs
+ci: fmt-check nix-fmt-check check lint test doc ## Everything CI runs
 
 .PHONY: clean
 clean: ## Remove build artifacts
