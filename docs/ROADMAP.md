@@ -1,6 +1,6 @@
 # Roadmap
 
-Read [CHANGELOG.md](CHANGELOG.md) for what was already built.
+Read [CHANGELOG.md](../CHANGELOG.md) for what was already built.
 
 ## Next
 

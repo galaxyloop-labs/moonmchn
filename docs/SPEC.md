@@ -1,6 +1,6 @@
 # Moon MCHN specification
 
-Detailed behavior of the Moon MCHN library and CLI. [README.md](README.md) gives the
+Detailed behavior of the Moon MCHN library and CLI. [README.md](../README.md) gives the
 overview and the commands.
 
 ## Workspace

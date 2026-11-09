@@ -1,7 +1,7 @@
 # Moon MCHN images
 
 The official images Moon MCHN machines boot, built with Nix `dockerTools` from nixpkgs
-unstable. Each one keeps the guest contract in [SPEC.md](../SPEC.md#guest-contract).
+unstable. Each one keeps the guest contract in [SPEC.md](../docs/SPEC.md#guest-contract).
 
 ## Kinds and names
 

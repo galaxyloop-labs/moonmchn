@@ -7,7 +7,6 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/galaxyloop-labs/moonmchn/badge)](https://scorecard.dev/viewer/?uri=github.com/galaxyloop-labs/moonmchn)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust 1.99+](https://img.shields.io/badge/rust-1.99%2B-orange?logo=rust)](Cargo.toml)
-[![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
 [![Platforms: macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](#quick-start)
 [![GitHub stars](https://img.shields.io/github/stars/galaxyloop-labs/moonmchn?style=flat)](https://github.com/galaxyloop-labs/moonmchn/stargazers)
 
@@ -15,7 +14,7 @@ MicroVMs for the AI era.
 
 Moon MCHN offers VMs to run AI agents and assistants, or to use as a general-purpose development tool.
 
-While we want to provide a secure environment, be aware that Moon MCHN is an early release. Read [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md) to learn more about the present and the future of this project.
+While we want to provide a secure environment, be aware that Moon MCHN is an early release. Read [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](docs/ROADMAP.md) to learn more about the present and the future of this project.
 
 ## Why
 
@@ -30,30 +29,18 @@ Each machine comes with:
 
 ## Quick start
 
-You need an Apple Silicon Mac or Linux with KVM (`/dev/kvm`), and the Rust toolchain:
+You need an Apple Silicon Mac or Linux with KVM (`/dev/kvm`), and Rust 1.99 or later:
 
 ```sh
-git clone https://github.com/galaxyloop-labs/moonmchn
-cd moonmchn
-cargo install --path crates/moonmchn-cli
-mchn setup                 # run once; writes ~/.config/moonmchn/config.toml, sized to this host
-mchn daemon start          # starts the daemon in the background
-mchn start dev             # boots a machine named dev from the official image
-mchn shell dev             # opens a shell in it
-mchn exec dev -- uname -a  # runs one command in it
-mchn stop dev              # stops it and discards its disk
-mchn --help                # shows all the commands
+cargo install moonmchn-cli --locked  # installs mchn with the dependency versions the release pinned
+mchn setup                           # run once; writes ~/.config/moonmchn/config.toml, sized to this host
+mchn daemon start                    # starts the daemon in the background
+mchn start dev                       # boots a machine named dev from the official image
+mchn shell dev                       # opens a shell in it
+mchn exec dev -- uname -a            # runs one command in it
+mchn stop dev                        # stops it and discards its disk
+mchn --help                          # shows all the commands
 ```
-
-## Verify a release
-
-Each [release](https://github.com/galaxyloop-labs/moonmchn/releases) carries an `mchn` archive per platform and a `SHA256SUMS` file, all with a signed build attestation that names this repository and the workflow that built them:
-
-```sh
-gh attestation verify mchn-v0.1.0-aarch64-darwin.tar.gz --repo galaxyloop-labs/moonmchn
-```
-
-The crates on crates.io publish from the same workflow through Trusted Publishing.
 
 ## What it protects, and what it does not yet
 
@@ -65,48 +52,25 @@ Moon MCHN keeps out of a machine's reach:
 Not yet:
 
 - **What you hand in.** A mounted directory is the machine's to read and change.
-- **The network.** Network rules are still early: in 0.1.0, `setup` starts with every host allowed, for you to narrow, and DNS queries pass unchecked. In a future version, the [egress firewall](ROADMAP.md) will check every connection and DNS query, and deny by default.
-- **The VM process.** Under the 0.1.0 engine, the process that runs the VM has your user's permissions, so a guest that escaped the VM would get them. Confining that process with Seatbelt on macOS and Landlock on Linux is next on the [roadmap](ROADMAP.md).
+- **The network.** Network rules are still early: in 0.1.0, `setup` starts with every host allowed, for you to narrow, and DNS queries pass unchecked. In a future version, the [egress firewall](docs/ROADMAP.md) will check every connection and DNS query, and deny by default.
+- **The VM process.** Under the 0.1.0 engine, the process that runs the VM has your user's permissions, so a guest that escaped the VM would get them. Confining that process with Seatbelt on macOS and Landlock on Linux is next on the [roadmap](docs/ROADMAP.md).
 
-[Known limitations](SPEC.md#known-limitations) lists the rest.
+[Known limitations](docs/SPEC.md#known-limitations) lists the rest.
 
 ## How it compares
 
-Moon MCHN is made for one developer's own Mac or Linux machine, with two choices at its core, both on the [roadmap](ROADMAP.md):
+Moon MCHN is made for one developer's own Mac or Linux machine, with two choices at its core, both on the [roadmap](docs/ROADMAP.md):
 
 - **Two walls.** The microVM, and the host process that runs it, confined by the host kernel: Seatbelt on macOS, Landlock on Linux.
 - **Machines you can rebuild.** Toolchains come from Nix packs pinned in the machine's spec, so the same spec gives the same machine.
 
-## Use it as a library
-
-The library is the product, and `mchn` is a thin wrapper over it. An application can use the `moonmchn` crate to write configuration, run the daemon and drive machines, with any engine that implements its `Engine` and `Machine` traits. [Library](SPEC.md#library) and [Machine backends](SPEC.md#machine-backends) describe the API.
-
 ## Development
 
-- `crates/moonmchn`: the library, with configuration, setup, the daemon, and the `Engine` and `Machine` traits.
-- `crates/moonmchn-smolmachines`: the engine adapter for smolmachines.
-- `crates/moonmchn-cli`: the `mchn` binary.
-- `images/`: the official machine images, built with Nix. [images/README.md](images/README.md) covers building and publishing them.
-
-Development needs Nix with flakes. If you use `direnv`, `cd`'ing in the directory enables the Nix flake automatically. Otherwise run `nix develop`.
-
-```sh
-make help   # lists the targets
-make fmt    # formats the Rust and the Nix code
-make ci     # fmt-check, nix-fmt-check, workflows-check, check, lint, test and doc across the workspace
-make audit  # checks dependencies against the RustSec advisory database
-make deny   # checks dependency licenses, bans, advisories and sources
-```
-
-The code holds itself to strict rules:
-- `unsafe` is forbidden in every crate of the workspace, and Clippy warnings fail `make ci`.
-- Every dependency is pinned in `Cargo.lock`. `deny.toml` lists the licenses allowed and denies unknown registries and git sources.
-- Dependabot proposes dependency updates weekly, and OpenSSF Scorecard rates the repository's supply-chain practices on every push to `main`.
-- GitHub Actions are pinned to commit SHAs.
+[DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the repository layout, the Nix setup, the `make` targets, the rules the code holds itself to, and how to verify a release.
 
 ## Security
 
-Report vulnerabilities privately through [GitHub's private vulnerability reporting](https://github.com/galaxyloop-labs/moonmchn/security/advisories/new). [SECURITY.md](SECURITY.md) covers what to include, what happens next, and what is in scope.
+Report vulnerabilities privately through [GitHub's private vulnerability reporting](https://github.com/galaxyloop-labs/moonmchn/security/advisories/new). [SECURITY.md](docs/SECURITY.md) covers what to include, what happens next, and what is in scope.
 
 ## License
 

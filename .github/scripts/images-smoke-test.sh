@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Checks that a base image archive keeps the guest contract (SPEC.md, Guest contract) and that its
-# Nix works, by running it in Docker, and that every layer unpacks under the engine.
+# Checks that a base image archive keeps the guest contract (docs/SPEC.md, Guest contract) and
+# that its Nix works, by running it in Docker, and that every layer unpacks under the engine.
 #
 # Usage: images-smoke-test.sh <docker-archive>
 set -euo pipefail

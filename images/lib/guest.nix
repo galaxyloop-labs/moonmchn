@@ -1,4 +1,4 @@
-# The guest contract (SPEC.md, Guest contract) that every Moon MCHN base image keeps: the
+# The guest contract (docs/SPEC.md, Guest contract) that every Moon MCHN base image keeps: the
 # `moonmchn` user with no password and no privileged group, its home, and a shared `/tmp`.
 { pkgs }:
 let
