@@ -1,5 +1,7 @@
 # Moon MCHN (Moon Machine)
 
+![Moon MCHN](assets/splash.jpg)
+
 [![CI](https://github.com/galaxyloop-labs/moonmchn/actions/workflows/ci.yml/badge.svg)](https://github.com/galaxyloop-labs/moonmchn/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/galaxyloop-labs/moonmchn?include_prereleases&sort=semver)](https://github.com/galaxyloop-labs/moonmchn/releases)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/galaxyloop-labs/moonmchn/badge)](https://scorecard.dev/viewer/?uri=github.com/galaxyloop-labs/moonmchn)
