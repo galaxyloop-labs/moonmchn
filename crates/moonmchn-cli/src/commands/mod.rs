@@ -1,4 +1,4 @@
-//! One module per subcommand.
+//! One module per subcommand, and `machine` for the machine subcommands at the root.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod daemon;

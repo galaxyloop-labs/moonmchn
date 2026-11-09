@@ -24,26 +24,26 @@ The library is the product; the `mchn` binary is a thin wrapper over it.
 ```sh
 cargo install --path crates/moonmchn-cli
 mchn --help
-mchn version                                       # prints v{version} from the workspace, e.g. v0.1.0
-mchn setup                                         # creates ~/.config/moonmchn/config.toml
-mchn daemon start                                  # starts the daemon in the background
-mchn daemon status                                 # prints the daemon's pid and version
-mchn daemon stop [--force]                         # stops the daemon; --force also stops every machine
-mchn machine start <name> [--image <ref|archive>]  # boots a machine from config.toml and an image
-mchn machine stop <name>                           # stops a machine and discards its disks
-mchn machine status [-e] <name>                    # prints its state; -e adds its spec
-mchn machine list                                  # prints one line per machine
-mchn machine exec [--no-tty] <name> -- <command>…  # runs a command in a machine
-mchn machine shell <name>                          # opens a login shell in a machine
+mchn version                               # prints v{version} from the workspace, e.g. v0.1.0
+mchn setup                                 # creates ~/.config/moonmchn/config.toml
+mchn daemon start                          # starts the daemon in the background
+mchn daemon status                         # prints the daemon's pid and version
+mchn daemon stop [--force]                 # stops the daemon; --force also stops every machine
+mchn start <name> [--image <ref|archive>]  # boots a machine from config.toml and an image
+mchn stop <name>                           # stops a machine and discards its disks
+mchn status [-e] <name>                    # prints its state; -e adds its spec
+mchn list                                  # prints one line per machine
+mchn exec [--no-tty] <name> -- <command>…  # runs a command in a machine
+mchn shell <name>                          # opens a login shell in a machine
 ```
 
 `mchn setup` writes host-aware machine defaults, and leaves an existing file
-untouched unless you pass `--force`. The daemon runs on Linux and macOS; `start` and
-`stop` succeed when the daemon is already in the requested state. `daemon stop`
-refuses while machines run, unless you pass `--force`. Machine commands talk to the
-daemon, so start it first.
+untouched unless you pass `--force`. The daemon runs on Linux and macOS; `daemon start`
+and `daemon stop` succeed when the daemon is already in the requested state.
+`daemon stop` refuses while machines run, unless you pass `--force`. Machine commands
+talk to the daemon, so start it first.
 
-`machine start` boots the official Moon MCHN image unless `--image` names another:
+`mchn start` boots the official Moon MCHN image unless `--image` names another:
 a registry reference that starts with its host, or a `docker save` archive. A
 private image boots by its digest, `--image <repository>@sha256:<digest>`, with the
 engine's registries file holding the credentials; see

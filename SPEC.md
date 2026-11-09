@@ -5,7 +5,9 @@ overview and the commands.
 
 ## Workspace
 
-Command modules live in `crates/moonmchn-cli/src/commands/`, one per subcommand.
+Command modules live in `crates/moonmchn-cli/src/commands/`, one per subcommand, and
+`machine` for the machine subcommands at the root: `mchn start`, `stop`, `status`,
+`list`, `exec` and `shell`.
 Each needs only the core library, except two that name the adapter crate: `daemon`,
 which names `moonmchn_smolmachines::Engine` to run the daemon for `--detached`,
 and `machine`, which names `moonmchn_smolmachines::session` to open `exec` and
@@ -142,7 +144,7 @@ sections containing `source`, `target`, `read_only`, and `staged`. A staged moun
 is writable and cannot also be read-only. Host mounts are local-only; a source
 starting with `s3://`, `gs://`, `r2://` or `rclone://` denotes a remote volume.
 Every other source is a host directory and must be an absolute path:
-`machine start` rejects a relative one, because the engine would resolve it
+`mchn start` rejects a relative one, because the engine would resolve it
 against the daemon's working directory, wherever `daemon start` ran.
 
 `[egress]` decides which hosts a machine's guest may reach (see [Egress](#egress)),
@@ -213,7 +215,7 @@ names a machine SDK:
   returns the digest of the content an image names, which the machine about to boot
   then runs pinned.
 - `Machine` carries the behavior: `start(name, spec, egress)` creates and boots a
-  machine from its `Spec`, what `machine start` asked for, its image pinned to
+  machine from its `Spec`, what `mchn start` asked for, its image pinned to
   that digest, with its network routed through the daemon's egress decider: `egress`,
   an `EgressEndpoint`, holds the decider's loopback address and the machine's token,
   64 hex digits its gateway presents with every flow; `attach(name)` reopens a handle
@@ -279,7 +281,7 @@ The daemon calls `image_digest` and every `Machine` method on a blocking thread,
 one handle per request, so implementations may block. It calls `Gateway`'s
 functions from its decider, which owns the connection and its deadline.
 
-`machine exec` and `machine shell` first send the daemon a `machine_resolve` request,
+`mchn exec` and `mchn shell` first send the daemon a `machine_resolve` request,
 which succeeds once the daemon owns the machine and no start or stop holds it. The
 session then reaches the machine by its name, which is how the engine addresses it
 on this host.
@@ -325,27 +327,27 @@ must point to the appropriate member crate rather than the repository root.
 | `daemon status` | `Running (pid N, version X)` | 0 |
 | `daemon status` with no daemon running | `error: the daemon is not running` on stderr | 1 |
 
-`start` and `stop` describe a state, so reaching it with nothing to do counts as
-success. `status` asks a question, so "not running" is a failing answer. Any other
-error prints `error: <message>` on stderr and exits with 1.
+`daemon start` and `daemon stop` describe a state, so reaching it with nothing to do
+counts as success. `daemon status` asks a question, so "not running" is a failing
+answer. Any other error prints `error: <message>` on stderr and exits with 1.
 
-`start` launches a background copy of `mchn` and returns once that copy
+`daemon start` launches a background copy of `mchn` and returns once that copy
 reports ready, waiting up to 5 seconds. Errors from the daemon's own startup are
-reported by `start`, and a daemon that never becomes ready is killed. The daemon
-leaves the terminal's session, so closing the terminal or pressing Ctrl-C leaves it
-running. It shows up in `ps` as `mchn daemon start --detached`; `start` passes
-that hidden flag to the background copy.
+reported by `daemon start`, and a daemon that never becomes ready is killed. The
+daemon leaves the terminal's session, so closing the terminal or pressing Ctrl-C
+leaves it running. It shows up in `ps` as `mchn daemon start --detached`;
+`daemon start` passes that hidden flag to the background copy.
 
-`stop` refuses while the daemon holds any machine: every machine with a record,
-whatever its state, plus boots still in progress. `stop --force` stops them all
-first; see [Stopping](#stopping).
+`daemon stop` refuses while the daemon holds any machine: every machine with a
+record, whatever its state, plus boots still in progress. `daemon stop --force` stops
+them all first; see [Stopping](#stopping).
 
-`stop` and `status` give up after 5 seconds when the daemon accepts the connection
-but doesn't read the request or doesn't answer. They fail at once when the daemon
-has stopped accepting connections and its queue is full. After the daemon
-acknowledges, `stop` also waits up to 5 seconds for it to release its lock, so
-`daemon stop && daemon start` works. `stop --force` waits up to 5 minutes for both,
-since the daemon stops every machine before it exits.
+`daemon stop` and `daemon status` give up after 5 seconds when the daemon accepts the
+connection but doesn't read the request or doesn't answer. They fail at once when
+the daemon has stopped accepting connections and its queue is full. After the daemon
+acknowledges, `daemon stop` also waits up to 5 seconds for it to release its lock,
+so `daemon stop && daemon start` works. `daemon stop --force` waits up to 5 minutes
+for both, since the daemon stops every machine before it exits.
 
 ### State directory
 
@@ -372,9 +374,9 @@ Moon MCHN never changes existing permissions.
 | `egress/port` | `0600` | the port on `127.0.0.1` where the daemon listens for egress decisions; see below |
 
 The lock on `daemon.pid` decides whether a daemon is running. Files left behind by
-a daemon that crashed need no cleanup: the next `start` takes the lock and replaces
-them. Machine records and `egress/port` are the exceptions: they stay, and the next
-daemon reads them.
+a daemon that crashed need no cleanup: the next `daemon start` takes the lock and
+replaces them. Machine records and `egress/port` are the exceptions: they stay, and
+the next daemon reads them.
 
 A machine can outlive the daemon that started it: a daemon killed outright or
 crashed leaves its machines running, and so does one whose stop of a machine fails
@@ -395,7 +397,7 @@ machine depends on the port, so the daemon moves to a free one and writes it dow
 
 Unix socket paths are limited to 104 bytes on macOS and 108 on Linux.
 `~/.local/state/moonmchn/daemon.sock` takes about 50 bytes for a typical home,
-but a long `MOONMCHN_HOME` or `XDG_STATE_HOME` can make `start` fail.
+but a long `MOONMCHN_HOME` or `XDG_STATE_HOME` can make `daemon start` fail.
 
 ### Protocol
 
@@ -435,7 +437,7 @@ daemon the same way:
 1. It stops accepting connections. A client that connects now waits, and fails once
    the daemon exits.
 2. It waits for the requests it accepted earlier, boots in progress included. Among
-   them, `machine start` and `machine stop` fail with `the daemon is stopping`,
+   them, `mchn start` and `mchn stop` fail with `the daemon is stopping`,
    while the others answer as usual. A client that stops reading its reply is
    dropped after 5 seconds, so it cannot hold up the teardown. The wait lasts at
    most 5 minutes: a request still running then, for example one stuck in an
@@ -454,7 +456,7 @@ daemon the same way:
 
 An unforced `daemon stop` only gets past the refusal with no machines, so
 `daemon stop --force` and `SIGTERM` are the two ways that stop machines. A machine
-that fails to stop keeps its record, so a later `machine stop` can retry; the daemon
+that fails to stop keeps its record, so a later `mchn stop` can retry; the daemon
 exits anyway.
 
 ### Egress
@@ -529,8 +531,8 @@ whoever writes or approves a list cannot tell which addresses will be the host's
 smolmachines the engine refuses the host's loopback on its own too, so the gateway's
 `100.96.0.1` stays closed whatever the decider answers.
 
-The lists are the ones in the machine's spec, which `machine start` took from
-`config.toml`; a running machine keeps them until `machine stop` (see
+The lists are the ones in the machine's spec, which `mchn start` took from
+`config.toml`; a running machine keeps them until `mchn stop` (see
 [Lifecycle](#lifecycle)).
 
 Each machine has a token of its own, 32 random bytes drawn when it boots, kept in hex in
@@ -577,42 +579,42 @@ The decider writes one line per event to the daemon's log, each starting `egress
 
 ## Machines
 
-`mchn machine` runs on Linux and macOS and needs a running daemon; it never
-starts one.
+The machine commands, `mchn start`, `stop`, `status`, `list`, `exec` and `shell`, run
+on Linux and macOS and need a running daemon; they never start one.
 
 ### Commands
 
 | Command | Prints | Exit code |
 |---|---|---|
-| `machine start x` | `Machine x started (pid N)`, or `Machine x already running (pid N)` | 0 |
-| `machine start x --image <image>` | the same, booting that image; see [Images](#images) | 0 |
-| `machine stop x` | `Machine x stopped`, or `Machine x not running` | 0 |
-| `machine status x` | `running (pid N)`, `starting`, `stopping`, `paused`, `failed` or `unknown` | 0 |
-| `machine status --extended x` | the block below | 0 |
-| `machine list` | one `x  running (pid N)` line per machine, sorted by name; nothing when there are none | 0 |
-| `machine exec x -- <command>…` | whatever the command prints; see [Sessions](#sessions) | the command's |
-| `machine shell x` | a login shell as `moonmchn`, in `/home/moonmchn` | the shell's |
-| `machine status x`, `machine exec x` or `machine shell x` for an unknown name | `error: machine x not found` | 1 |
-| `machine start Alpha` | `error: invalid machine name "Alpha": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit` | 1 |
-| `machine start x`, with a bad pattern in `[egress]`, such as `allow = ["foo bar"]` or `deny = ["*"]` | `error: failed to parse …/config.toml as TOML: …`, naming the pattern and its rule: `invalid egress pattern "foo bar": labels contain letters, digits and '-', and cannot be empty` | 1 |
-| `machine start x`, with a relative mount source such as `./data` | `error: invalid mount source "./data": a host directory must be an absolute path` | 1 |
-| `machine start x --image alpine`, a reference without its registry host | `error: invalid image "alpine": a registry reference must start with its registry host` | 1 |
-| `machine start x --image -` | `error: invalid image "-": an image on stdin is not supported; pass the archive's path` | 1 |
-| `machine start x --image ./rootfs/`, a directory | `error: invalid image "./rootfs/": a local image must be a docker save archive file` | 1 |
-| `machine start x --image ghcr.io/org/private:tag`, a private image | `error: failed to resolve image ghcr.io/org/private:tag: 403 Forbidden from https://ghcr.io/token: …`; see [Images](#images) | 1 |
-| `machine start x`, for a record the engine cannot report | ``error: the engine cannot report machine x; retry, or run `mchn machine stop x` to discard it`` | 1 |
-| `machine start x`, running or paused with a different configuration, `[egress]` included, or image | ``error: machine x is running with a different configuration; run `mchn machine stop x` to discard it, then start it again`` | 1 |
-| `machine start`, `stop`, `exec` or `shell` on `x` while another client starts or stops `x` | `error: machine x is starting`, or `stopping` | 1 |
-| `machine exec x` without `--` and a command | clap's usage error | 2 |
-| `machine exec` or `machine shell`, when the machine stops during the session | the announcement, then the session ends; see [Lifecycle](#lifecycle) | 129 |
-| `machine exec` or `machine shell`, on a record left by a reboot | the engine client's own message, such as `Error: vm not found: x` | the client's |
-| `machine exec` or `machine shell`, with no engine and no download allowed, or `SMOLVM` naming no file | `error: the engine failed: …` | 1 |
-| `machine exec` or `machine shell`, with `SMOLVM` naming a file that cannot run | `error: failed to run the engine client <path>: …` | 1 |
+| `mchn start x` | `Machine x started (pid N)`, or `Machine x already running (pid N)` | 0 |
+| `mchn start x --image <image>` | the same, booting that image; see [Images](#images) | 0 |
+| `mchn stop x` | `Machine x stopped`, or `Machine x not running` | 0 |
+| `mchn status x` | `running (pid N)`, `starting`, `stopping`, `paused`, `failed` or `unknown` | 0 |
+| `mchn status --extended x` | the block below | 0 |
+| `mchn list` | one `x  running (pid N)` line per machine, sorted by name; nothing when there are none | 0 |
+| `mchn exec x -- <command>…` | whatever the command prints; see [Sessions](#sessions) | the command's |
+| `mchn shell x` | a login shell as `moonmchn`, in `/home/moonmchn` | the shell's |
+| `mchn status x`, `mchn exec x` or `mchn shell x` for an unknown name | `error: machine x not found` | 1 |
+| `mchn start Alpha` | `error: invalid machine name "Alpha": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit` | 1 |
+| `mchn start x`, with a bad pattern in `[egress]`, such as `allow = ["foo bar"]` or `deny = ["*"]` | `error: failed to parse …/config.toml as TOML: …`, naming the pattern and its rule: `invalid egress pattern "foo bar": labels contain letters, digits and '-', and cannot be empty` | 1 |
+| `mchn start x`, with a relative mount source such as `./data` | `error: invalid mount source "./data": a host directory must be an absolute path` | 1 |
+| `mchn start x --image alpine`, a reference without its registry host | `error: invalid image "alpine": a registry reference must start with its registry host` | 1 |
+| `mchn start x --image -` | `error: invalid image "-": an image on stdin is not supported; pass the archive's path` | 1 |
+| `mchn start x --image ./rootfs/`, a directory | `error: invalid image "./rootfs/": a local image must be a docker save archive file` | 1 |
+| `mchn start x --image ghcr.io/org/private:tag`, a private image | `error: failed to resolve image ghcr.io/org/private:tag: 403 Forbidden from https://ghcr.io/token: …`; see [Images](#images) | 1 |
+| `mchn start x`, for a record the engine cannot report | ``error: the engine cannot report machine x; retry, or run `mchn machine stop x` to discard it`` | 1 |
+| `mchn start x`, running or paused with a different configuration, `[egress]` included, or image | ``error: machine x is running with a different configuration; run `mchn machine stop x` to discard it, then start it again`` | 1 |
+| `mchn start`, `stop`, `exec` or `shell` on `x` while another client starts or stops `x` | `error: machine x is starting`, or `stopping` | 1 |
+| `mchn exec x` without `--` and a command | clap's usage error | 2 |
+| `mchn exec` or `mchn shell`, when the machine stops during the session | the announcement, then the session ends; see [Lifecycle](#lifecycle) | 129 |
+| `mchn exec` or `mchn shell`, on a record left by a reboot | the engine client's own message, such as `Error: vm not found: x` | the client's |
+| `mchn exec` or `mchn shell`, with no engine and no download allowed, or `SMOLVM` naming no file | `error: the engine failed: …` | 1 |
+| `mchn exec` or `mchn shell`, with `SMOLVM` naming a file that cannot run | `error: failed to run the engine client <path>: …` | 1 |
 | any machine command with no daemon running | `error: the daemon is not running` | 1 |
 
 Errors go to stderr. ` (pid N)` appears wherever the engine reports a pid.
 
-`machine status --extended x` (`-e`) prints the name and state, a blank line, then
+`mchn status --extended x` (`-e`) prints the name and state, a blank line, then
 the machine's spec, as TOML: what it was started with, its image pinned to the
 digest it resolved to (see [Images](#images) and [Records](#records)):
 
@@ -638,13 +640,13 @@ deny = []
 The TOML part is left out when there is no record yet, for example during the
 moment between a boot claiming the name and writing its record.
 
-`machine start` reads `config.toml` (see [Directories](#directories)) and sends it
+`mchn start` reads `config.toml` (see [Directories](#directories)) and sends it
 with the request; the daemon reads no user files. Every machine starts from that
 one configuration; the name and `--image` are the only per-machine inputs.
 
 ### Images
 
-`machine start x` boots `Image::default()`,
+`mchn start x` boots `Image::default()`,
 `ghcr.io/galaxyloop-labs/moonmchn-images:default`, unless `--image` names another
 in one of two forms:
 
@@ -668,10 +670,10 @@ is pulled by that digest, with no request to resolve it, and an archive whose im
 id differs, or a reference that names another digest, is refused before anything is
 written: `image <image> holds sha256:…, but the spec pins sha256:…`.
 
-A machine that exists is never resolved again: `machine start` on it compares its
+A machine that exists is never resolved again: `mchn start` on it compares its
 spec with the request, every field but the digest, which counts only when the
 request names one. So it needs no network and treats a moved tag as the same
-machine. `machine stop` then `machine start` boots the tag's new content.
+machine. `mchn stop` then `mchn start` boots the tag's new content.
 
 The daemon asks registries anonymously, over `https`. A private image fails to
 resolve: ghcr.io refuses the anonymous token with `403 Forbidden`, and other
@@ -681,7 +683,7 @@ its registries file (see [Engine](#engine)).
 
 ### Sessions
 
-`machine exec x -- <command>…` and `machine shell x` ask the daemon for the
+`mchn exec x -- <command>…` and `mchn shell x` ask the daemon for the
 machine, then replace the CLI with the engine's client, which carries the session:
 stdin, stdout and stderr pass through untouched, and the exit status is the
 command's. Both run as `moonmchn` in `/home/moonmchn`; `shell` opens a login
@@ -701,45 +703,45 @@ shell, `sh -l`, with a terminal.
 
 | State | Meaning |
 |---|---|
-| `starting` | a `machine start` is booting it, or the engine reports it booting |
+| `starting` | a `mchn start` is booting it, or the engine reports it booting |
 | `running` | the engine reports it running |
-| `stopping` | a `machine stop` is destroying it, or the engine reports it stopping |
-| `paused` | the engine is saving or holds its execution for a later resume. `machine start` resumes it when the configuration matches and refuses a different one; `machine stop` discards it |
-| `failed` | the engine reports it dead: stopped, errored or deleted. `machine start` deletes it and boots it fresh |
-| `unknown` | the engine gave no usable answer: the machine may be missing, or the engine could not be asked. Nothing acts on it: `machine start` refuses, and `machine stop` asks the engine to confirm |
+| `stopping` | a `mchn stop` is destroying it, or the engine reports it stopping |
+| `paused` | the engine is saving or holds its execution for a later resume. `mchn start` resumes it when the configuration matches and refuses a different one; `mchn stop` discards it |
+| `failed` | the engine reports it dead: stopped, errored or deleted. `mchn start` deletes it and boots it fresh |
+| `unknown` | the engine gave no usable answer: the machine may be missing, or the engine could not be asked. Nothing acts on it: `mchn start` refuses, and `mchn stop` asks the engine to confirm |
 
 ### Lifecycle
 
-Machines are ephemeral: `machine stop` destroys the machine together with its
-disks, and the next `machine start` boots a fresh one. `machine start` on a running
+Machines are ephemeral: `mchn stop` destroys the machine together with its
+disks, and the next `mchn start` boots a fresh one. `mchn start` on a running
 machine with the same configuration changes nothing and reports `already running`,
 so it is safe to repeat. With a different configuration it refuses: applying it
 needs a fresh boot, which would destroy the running machine. The engine may report
-a machine paused, although Moon MCHN never pauses one: `machine start` resumes it
+a machine paused, although Moon MCHN never pauses one: `mchn start` resumes it
 under the same configuration rule and reports `started`, where the engine can resume
 it. Under smolmachines it cannot, for a machine started with mediated egress, which
-every machine is: `machine start` reports the engine's refusal,
+every machine is: `mchn start` reports the engine's refusal,
 `mediated egress: this machine requires an external interceptor on every start`, and
-`machine stop` discards the machine.
+`mchn stop` discards the machine.
 
 Every machine gets its egress token when it boots: the daemon draws it, writes it into
 the record before the engine starts the machine, and answers for it from then on (see
-[Egress](#egress)). A boot that fails removes the record, and `machine stop` removes it
+[Egress](#egress)). A boot that fails removes the record, and `mchn stop` removes it
 once the machine is gone; either way the daemon stops answering for the token.
 
-The daemon runs one operation per name at a time. A concurrent `machine start` or
-`machine stop` on a name being started or stopped fails at once; it never waits.
+The daemon runs one operation per name at a time. A concurrent `mchn start` or
+`mchn stop` on a name being started or stopped fails at once; it never waits.
 Sequential scripts are safe, because the daemon replies only once an operation has
-ended: `machine stop x && machine start x` works.
+ended: `mchn stop x && mchn start x` works.
 
-The CLI waits up to 5 seconds for `machine status` and `machine list`, and up to 5
-minutes for `machine start` and `machine stop`. Each bound applies to sending the
+The CLI waits up to 5 seconds for `mchn status` and `mchn list`, and up to 5
+minutes for `mchn start` and `mchn stop`. Each bound applies to sending the
 request and then again to waiting for its reply, so a daemon that stops reading is
 given up on as well. A client that times out, or is
 interrupted, leaves the daemon finishing the operation: the record ends consistent,
-and `machine status` shows the outcome.
+and `mchn status` shows the outcome.
 
-Before every stop, by `machine stop`, `daemon stop --force` or `SIGTERM`, the daemon
+Before every stop, by `mchn stop`, `daemon stop --force` or `SIGTERM`, the daemon
 announces it inside the machine. Every terminal in the guest shows:
 
 ```
@@ -749,7 +751,7 @@ Machine x is stopping now: mchn machine stop x.
 ```
 
 with `the Moon MCHN daemon is stopping` as the reason when the daemon itself stops.
-The daemon then hangs up every session, so each `machine exec` and `machine shell`
+The daemon then hangs up every session, so each `mchn exec` and `mchn shell`
 ends with exit status 129 before the machine disappears, and the stop follows at
 once. The announcement is best effort: Moon MCHN gives up on it after 5 seconds,
 a failure is ignored, and it never blocks the stop.
@@ -757,17 +759,17 @@ a failure is ignored, and it never blocks the stop.
 ### Records
 
 The daemon keeps one record per machine, `machines/<name>` in the state directory,
-holding the machine's spec as TOML: what `machine start` asked for, the image as
+holding the machine's spec as TOML: what `mchn start` asked for, the image as
 given included, with the digest it resolved to beside it (see [Images](#images)).
-`machine status --extended` prints that spec, as in the block above. A record:
+`mchn status --extended` prints that spec, as in the block above. A record:
 
 - is written before the boot, so its modification time is the start time;
-- is removed only once the engine confirms the machine is gone: `machine stop`
+- is removed only once the engine confirms the machine is gone: `mchn stop`
   succeeded, or the engine has no such machine (only its own `vm not found`
   answer naming the machine counts), so a failing engine install keeps the record;
-- stays when `machine stop` fails, so the machine stays listed and a retry finds it;
+- stays when `mchn stop` fails, so the machine stays listed and a retry finds it;
 - stays when a boot fails and deleting the half-created machine fails too, and
-  `machine stop` retries the deletion;
+  `mchn stop` retries the deletion;
 - survives daemon restarts, so a new daemon reports on the machines an earlier one
   started;
 - is enough to boot the same content again: `--image <repository>@<digest>` for a
@@ -777,7 +779,7 @@ In the file, the spec sits under `[spec]`, below an `[egress]` table holding `to
 64 hex digits that the machine's network gateway presents to the daemon's egress
 decider. The token is random, drawn by the daemon when the machine boots and kept
 for its life; a new daemon reloads it from the record (see
-[State directory](#state-directory)). `machine status`, `--extended` included,
+[State directory](#state-directory)). `mchn status`, `--extended` included,
 never shows it: the daemon replies with the spec alone, so the token never reaches
 the CLI. The daemon never logs it either.
 
@@ -790,14 +792,14 @@ default, so `alpha` and `Alpha` would share one record.
 The daemon drives machines through smolmachines 1.32.2. Unless a compatible `smolvm`
 is installed, on `PATH` or as `~/.local/bin/smolvm` or `~/.smolvm/smolvm`, the SDK
 downloads its pinned, checksum-verified engine (about 37 MiB) on the first
-`machine start`, into its cache: `$SMOLMACHINES_CACHE_DIR`, else
+`mchn start`, into its cache: `$SMOLMACHINES_CACHE_DIR`, else
 `$XDG_CACHE_HOME/smolmachines`, else `~/Library/Caches/smolmachines` on macOS and
 `~/.cache/smolmachines` on Linux. `SMOLMACHINES_NO_DOWNLOAD=1` forbids the download,
 and `SMOLVM` points the SDK at an engine binary of your choice. The daemon inherits
 the environment of the `daemon start` that launched it, so export these variables
 before `daemon start`.
 
-`machine exec` and `machine shell` run the engine's client found by the same rule,
+`mchn exec` and `mchn shell` run the engine's client found by the same rule,
 the SDK's `engine_cli()`, in the CLI's own environment: `SMOLVM` when set, else a
 compatible `smolvm` on `PATH`, else the pinned engine. Both run as `moonmchn` in
 `/home/moonmchn`.
@@ -833,7 +835,7 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
 
 - An `image` key in `config.toml`: every machine boots `Image::default()` or the
   `--image` given.
-- `machine restart`: run `machine stop x && machine start x`.
+- `mchn restart`: run `mchn stop x && mchn start x`.
 - Asking the user about a flow no list allows: it is denied.
 - TLS interception, which would let the decider read an HTTPS request's path: a deny
   line names an HTTPS flow by its host, and the lists cannot tell one path from
@@ -843,13 +845,13 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
 
 - `kill -9` and the OOM killer skip the teardown, announcements included, so a
   machine that stops without one points at a malfunction. Machines keep running
-  unobserved until the next `daemon start`, whose `machine list` shows them again
+  unobserved until the next `daemon start`, whose `mchn list` shows them again
   from their records.
 - After a reboot, or a crash that took the machines down, their records remain.
-  `machine list` keeps showing them, as `failed` when the engine reports them dead
-  and as `unknown` when it cannot report them, until `machine stop <name>` confirms
-  each with the engine and removes the record. Until then `machine exec` and
-  `machine shell` resolve such a record and fail at the engine, with its message.
+  `mchn list` keeps showing them, as `failed` when the engine reports them dead
+  and as `unknown` when it cannot report them, until `mchn stop <name>` confirms
+  each with the engine and removes the record. Until then `mchn exec` and
+  `mchn shell` resolve such a record and fail at the engine, with its message.
 - A private image cannot be resolved, since the daemon asks registries anonymously.
   Boot it by its digest, with the engine's registries file holding the credentials
   for the pull (see [Images](#images)).
@@ -865,8 +867,8 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
 - The first start of a machine pulls its image, which the engine does on the host
   before the guest's network exists (see [Egress](#egress)).
 - A record written before images, without `digest` and `image`, fails to parse:
-  `machine status` fails on it, and `machine exec` and `machine shell` fail at the
-  engine, until `machine stop` removes it and `machine start` boots afresh.
+  `mchn status` fails on it, and `mchn exec` and `mchn shell` fail at the
+  engine, until `mchn stop` removes it and `mchn start` boots afresh.
 - The announcement adds up to 5 seconds to every stop.
 - The egress lists judge TCP flows alone: DNS resolves freely, and every other UDP
   datagram is denied.
@@ -906,14 +908,14 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
   (virtual machine monitor) runs unconfined on the host.
 - Under smolmachines, the engine cannot pause a machine created from an archive, nor
   one with a GPU, whose Vulkan state its checkpoint cannot capture; and it cannot
-  resume a paused machine started with mediated egress. `machine start` on one
-  reports the engine's refusal, and `machine stop`, then `machine start`, is the way
+  resume a paused machine started with mediated egress. `mchn start` on one
+  reports the engine's refusal, and `mchn stop`, then `mchn start`, is the way
   out.
 - A home on a network filesystem may not support the daemon's socket and lock, or
   the engine's cache. Point `MOONMCHN_HOME` and `SMOLMACHINES_CACHE_DIR` at a
   local disk.
 - A slow first engine download can outlast the CLI's 5-minute wait. The daemon
-  finishes the boot anyway, and `machine status <name>` shows the outcome.
+  finishes the boot anyway, and `mchn status <name>` shows the outcome.
 - An engine call that never returns holds its request until the daemon stops, and
   each step of the teardown for at most 5 minutes; the daemon then exits without
   it, keeps that machine's record for the next daemon, and leaves the engine's own

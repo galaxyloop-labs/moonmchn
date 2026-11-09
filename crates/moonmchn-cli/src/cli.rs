@@ -35,7 +35,7 @@ pub(crate) enum DaemonCommand {
     Status,
 }
 
-/// `mchn machine` subcommands.
+/// Machine subcommands, at the root: `mchn start`, `mchn stop` and the rest.
 #[derive(Debug, Clone, Subcommand)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) enum MachineCommand {
@@ -104,12 +104,10 @@ pub(crate) enum Command {
         #[command(subcommand)]
         subcommand: DaemonCommand,
     },
-    /// Manage machines through the daemon
+    /// Machine subcommands, flattened into this list, so a machine starts with `mchn start x`.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    Machine {
-        #[command(subcommand)]
-        subcommand: MachineCommand,
-    },
+    #[command(flatten)]
+    Machine(MachineCommand),
 }
 
 impl Cli {
@@ -125,7 +123,7 @@ impl Cli {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             Command::Daemon { subcommand } => commands::daemon::run(subcommand, out),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            Command::Machine { subcommand } => commands::machine::run(subcommand, out),
+            Command::Machine(subcommand) => commands::machine::run(subcommand, out),
         }
     }
 }
@@ -239,71 +237,61 @@ mod tests {
 
     #[test]
     fn parses_machine_start_without_image() {
-        let cli = Cli::try_parse_from(["mchn", "machine", "start", "x"]).unwrap();
+        let cli = Cli::try_parse_from(["mchn", "start", "x"]).unwrap();
 
         assert!(matches!(
             cli.command,
-            Command::Machine {
-                subcommand: MachineCommand::Start { name, image: None }
-            } if name == "x"
+            Command::Machine(MachineCommand::Start { name, image: None }) if name == "x"
         ));
     }
 
     #[test]
     fn parses_machine_start_with_image() {
-        let cli = Cli::try_parse_from(["mchn", "machine", "start", "x", "--image", "./guest.tar"])
-            .unwrap();
+        let cli = Cli::try_parse_from(["mchn", "start", "x", "--image", "./guest.tar"]).unwrap();
 
         assert!(matches!(
             cli.command,
-            Command::Machine {
-                subcommand: MachineCommand::Start { name, image: Some(image) }
-            } if name == "x" && image == "./guest.tar"
+            Command::Machine(MachineCommand::Start { name, image: Some(image) })
+                if name == "x" && image == "./guest.tar"
         ));
     }
 
     #[test]
     fn parses_machine_exec_with_a_command() {
-        let cli =
-            Cli::try_parse_from(["mchn", "machine", "exec", "x", "--", "sh", "-c", "a b"]).unwrap();
+        let cli = Cli::try_parse_from(["mchn", "exec", "x", "--", "sh", "-c", "a b"]).unwrap();
 
         // `a b` stays one element: clap passes everything after `--` through as given.
         assert!(matches!(
             cli.command,
-            Command::Machine {
-                subcommand: MachineCommand::Exec { name, no_tty: false, command }
-            } if name == "x" && command == ["sh", "-c", "a b"]
+            Command::Machine(MachineCommand::Exec { name, no_tty: false, command })
+                if name == "x" && command == ["sh", "-c", "a b"]
         ));
     }
 
     #[test]
     fn parses_machine_exec_with_no_tty() {
-        let cli = Cli::try_parse_from(["mchn", "machine", "exec", "--no-tty", "x", "--", "true"])
-            .unwrap();
+        let cli = Cli::try_parse_from(["mchn", "exec", "--no-tty", "x", "--", "true"]).unwrap();
 
         assert!(matches!(
             cli.command,
-            Command::Machine {
-                subcommand: MachineCommand::Exec { name, no_tty: true, command }
-            } if name == "x" && command == ["true"]
+            Command::Machine(MachineCommand::Exec { name, no_tty: true, command })
+                if name == "x" && command == ["true"]
         ));
     }
 
     #[test]
     fn machine_exec_requires_a_command_after_double_dash() {
-        assert!(Cli::try_parse_from(["mchn", "machine", "exec", "x"]).is_err());
-        assert!(Cli::try_parse_from(["mchn", "machine", "exec", "x", "true"]).is_err());
+        assert!(Cli::try_parse_from(["mchn", "exec", "x"]).is_err());
+        assert!(Cli::try_parse_from(["mchn", "exec", "x", "true"]).is_err());
     }
 
     #[test]
     fn parses_machine_shell() {
-        let cli = Cli::try_parse_from(["mchn", "machine", "shell", "x"]).unwrap();
+        let cli = Cli::try_parse_from(["mchn", "shell", "x"]).unwrap();
 
         assert!(matches!(
             cli.command,
-            Command::Machine {
-                subcommand: MachineCommand::Shell { name }
-            } if name == "x"
+            Command::Machine(MachineCommand::Shell { name }) if name == "x"
         ));
     }
 }

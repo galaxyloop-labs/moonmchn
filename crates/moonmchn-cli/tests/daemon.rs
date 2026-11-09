@@ -1,4 +1,4 @@
-//! End-to-end tests for the `mchn daemon` and `mchn machine` commands.
+//! End-to-end tests for the `mchn daemon` commands and the machine commands, such as `mchn start`.
 //!
 //! None of them boots a machine, so none needs an engine.
 
@@ -222,7 +222,7 @@ fn machine_list_is_empty() {
 
     runtime
         .mchn()
-        .args(["machine", "list"])
+        .args(["list"])
         .assert()
         .success()
         .stdout("")
@@ -234,7 +234,7 @@ fn machine_status_of_an_unknown_machine_fails() {
     let runtime = Runtime::new();
     runtime.start();
 
-    for command in ["machine status x", "machine status -e x"] {
+    for command in ["status x", "status -e x"] {
         runtime
             .mchn()
             .args(command.split_whitespace())
@@ -252,7 +252,7 @@ fn machine_stop_of_an_unknown_machine_is_not_running() {
 
     runtime
         .mchn()
-        .args(["machine", "stop", "x"])
+        .args(["stop", "x"])
         .assert()
         .success()
         .stdout("Machine x not running\n");
@@ -265,7 +265,7 @@ fn machine_start_without_configuration_fails() {
 
     runtime
         .mchn()
-        .args(["machine", "start", "x"])
+        .args(["start", "x"])
         .assert()
         .failure()
         .code(1)
@@ -283,7 +283,7 @@ fn machine_start_rejects_an_uppercase_name() {
 
     runtime
         .mchn()
-        .args(["machine", "start", "Alpha"])
+        .args(["start", "Alpha"])
         .assert()
         .failure()
         .code(1)
@@ -302,7 +302,7 @@ fn machine_start_rejects_a_missing_archive() {
     // Cargo runs the tests from the crate's directory, which holds no `missing.tar`.
     runtime
         .mchn()
-        .args(["machine", "start", "x", "--image", "./missing.tar"])
+        .args(["start", "x", "--image", "./missing.tar"])
         .assert()
         .failure()
         .code(1)
@@ -315,7 +315,7 @@ fn machine_commands_need_the_daemon() {
 
     runtime
         .mchn()
-        .args(["machine", "list"])
+        .args(["list"])
         .assert()
         .failure()
         .code(1)
@@ -330,7 +330,7 @@ fn client_commands_create_no_state_directory() {
     runtime
         .mchn()
         .env("MOONMCHN_HOME", &missing)
-        .args(["machine", "list"])
+        .args(["list"])
         .assert()
         .failure()
         .code(1)
@@ -344,7 +344,7 @@ fn client_commands_create_no_state_directory() {
 fn machine_exec_and_shell_need_the_daemon() {
     let runtime = Runtime::new();
 
-    for command in ["machine exec x -- true", "machine shell x"] {
+    for command in ["exec x -- true", "shell x"] {
         runtime
             .mchn()
             .args(command.split_whitespace())
@@ -361,7 +361,7 @@ fn machine_exec_and_shell_of_an_unknown_machine_fail() {
     runtime.start();
 
     // No engine is involved: the daemon resolves a name from its records alone.
-    for command in ["machine exec x -- true", "machine shell x"] {
+    for command in ["exec x -- true", "shell x"] {
         runtime
             .mchn()
             .args(command.split_whitespace())
@@ -397,7 +397,7 @@ exec "$@"
 
     runtime
         .mchn()
-        .args(["machine", "exec", "x", "--", "true"])
+        .args(["exec", "x", "--", "true"])
         .env("SMOLVM", &engine)
         .assert()
         .success();
@@ -406,7 +406,7 @@ exec "$@"
     // usage errors.
     runtime
         .mchn()
-        .args(["machine", "exec", "x", "--", "sh", "-c", "exit 3"])
+        .args(["exec", "x", "--", "sh", "-c", "exit 3"])
         .env("SMOLVM", &engine)
         .assert()
         .code(3);

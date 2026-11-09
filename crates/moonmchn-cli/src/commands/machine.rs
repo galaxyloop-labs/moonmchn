@@ -1,4 +1,5 @@
-//! `mchn machine`: manage machines through the daemon.
+//! `mchn start`, `stop`, `status`, `list`, `exec` and `shell`: manage machines through the
+//! daemon.
 
 use std::io::{self, IsTerminal, Stderr, Stdin, Stdout, Write};
 use std::os::unix::process::CommandExt;
