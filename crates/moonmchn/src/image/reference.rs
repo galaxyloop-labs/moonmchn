@@ -27,7 +27,7 @@ const DEFAULT_IMAGE_HOST: &str = "ghcr.io";
 
 /// The repository of the image a machine boots by default: the one that holds every Moon MCHN
 /// image.
-const DEFAULT_IMAGE_PATH: &str = "galaxyloop-labs/moonmchn-images";
+const DEFAULT_IMAGE_PATH: &str = "galaxyloop-labs/moonmchn";
 
 /// The tag of the image a machine boots by default.
 const DEFAULT_IMAGE_TAG: &str = "default";
@@ -193,9 +193,9 @@ mod tests {
         let upper = format!("sha256:{}", hex.to_uppercase());
         let cases = [
             (
-                "ghcr.io/galaxyloop-labs/moonmchn-images:default".to_string(),
+                "ghcr.io/galaxyloop-labs/moonmchn:default".to_string(),
                 "ghcr.io",
-                "galaxyloop-labs/moonmchn-images",
+                "galaxyloop-labs/moonmchn",
                 "default",
                 None,
             ),

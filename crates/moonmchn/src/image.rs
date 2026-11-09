@@ -21,7 +21,7 @@
 //!
 //! // What a machine boots when `machine start` names none, and the content it resolved to.
 //! let image = Image::default();
-//! assert_eq!(image.as_str(), "ghcr.io/galaxyloop-labs/moonmchn-images:default");
+//! assert_eq!(image.as_str(), "ghcr.io/galaxyloop-labs/moonmchn:default");
 //! let digest = Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap();
 //!
 //! // The parts a registry client needs, from the reference the image holds.
@@ -35,7 +35,7 @@
 //! // changes nothing for this machine.
 //! assert_eq!(
 //!     image.pinned(&digest),
-//!     format!("ghcr.io/galaxyloop-labs/moonmchn-images@{digest}")
+//!     format!("ghcr.io/galaxyloop-labs/moonmchn@{digest}")
 //! );
 //! ```
 

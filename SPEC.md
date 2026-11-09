@@ -625,7 +625,7 @@ State:  running (pid 4242)
 mounts = []
 
 [image]
-name = "ghcr.io/galaxyloop-labs/moonmchn-images:default"
+name = "ghcr.io/galaxyloop-labs/moonmchn:default"
 digest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 
 [resources]
@@ -647,7 +647,7 @@ one configuration; the name and `--image` are the only per-machine inputs.
 ### Images
 
 `mchn start x` boots `Image::default()`,
-`ghcr.io/galaxyloop-labs/moonmchn-images:default`, unless `--image` names another
+`ghcr.io/galaxyloop-labs/moonmchn:default`, unless `--image` names another
 in one of two forms:
 
 - A registry reference that starts with its registry host, such as
