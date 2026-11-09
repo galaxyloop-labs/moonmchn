@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks that a base image archive keeps the guest contract (SPEC.md, Guest contract) and that its
-# Nix works, by running it in Docker.
+# Nix works, by running it in Docker, and that every layer unpacks under the engine.
 #
 # Usage: images-smoke-test.sh <docker-archive>
 set -euo pipefail
@@ -36,6 +36,15 @@ as_user() { docker run --rm "$image" "$@"; }
 as_root() { docker run --rm --user 0 "$image" "$@"; }
 config() { docker image inspect --format "$1" "$image"; }
 
+# Counts the entries, across every layer of the archive, whose path starts with `/`. smolvm
+# unpacks a registry image layer by layer and skips each such entry with a warning; Docker strips
+# the `/` and keeps it, so no check run in Docker sees the loss.
+absolute_entries() {
+  tar -xOf "$archive" manifest.json | jq -r '.[0].Layers[]' | while read -r layer; do
+    tar -xOf "$archive" "$layer" | tar -tP
+  done | grep -c '^/'
+}
+
 expect "the contract user" "uid=1000(moonmchn) gid=1000(moonmchn) groups=1000(moonmchn)" as_user id moonmchn
 expect "the default user is moonmchn" "moonmchn" as_user id -un
 expect "moonmchn has no password" "!" as_root sh -c "grep '^moonmchn:' /etc/shadow | cut -d: -f2"
@@ -51,6 +60,7 @@ expect "the store and the home belong to moonmchn" "1000 1000 1000" \
   as_user sh -c "stat -c %u /nix/store /nix/var/nix/db /home/moonmchn | tr '\n' ' ' | sed 's/ \$//'"
 expect "a shared /tmp" "1777" as_user stat -c %a /tmp
 expect "no entrypoint and no cmd" "null null" config "{{json .Config.Entrypoint}} {{json .Config.Cmd}}"
+expect "every layer names its files relatively" "0" absolute_entries
 # shellcheck disable=SC2016 # $PATH expands inside the image, from its config.
 expect "one-off installs reach PATH" "/home/moonmchn/.nix-profile/bin:/bin" as_user sh -c 'echo "$PATH"'
 expect "a one-off install works" "Hello, world!" \

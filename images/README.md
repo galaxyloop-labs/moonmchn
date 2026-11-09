@@ -97,7 +97,8 @@ image; no person does.
   stops no other.
 - **Smoke test** (`.github/scripts/images-smoke-test.sh`): the guest contract, the account
   files as regular files (the engine reads them from outside the guest's root), the store's
-  owner, and a one-off `nix profile add nixpkgs#hello`.
+  owner, a one-off `nix profile add nixpkgs#hello`, and no layer entry whose path starts with
+  `/` (the engine skips those when it pulls from a registry).
 - **Unchanged images stay put:** an image whose platforms' configs equal those the moving tag
   holds is not republished, so the bump republishes only what moved.
 - **Order:** each platform's manifest is pushed under `<tag>-<arch>`, a manifest list joins them

@@ -71,6 +71,9 @@ let
       "/usr"
     ];
   };
+
+  # The store paths the image holds: everything `root` refers to, `root` included.
+  closure = pkgs.closureInfo { rootPaths = [ root ]; };
 in
 pkgs.dockerTools.buildLayeredImage {
   name = image.repository;
@@ -78,15 +81,18 @@ pkgs.dockerTools.buildLayeredImage {
 
   contents = [ root ];
 
-  # The store and its database belong to the contract user, as a single-user install's do, so
-  # its Nix can add packages without root.
-  uid = guest.uid;
-  gid = guest.gid;
-  uname = guest.user;
-  gname = guest.user;
+  # smolvm unpacks a registry image one layer at a time and skips every entry whose path starts
+  # with `/`, which is how `buildLayeredImage` names the files of its store layers. So the image
+  # has none: `fakeRootCommands` copies the store into the last layer, whose files are named from
+  # `./`. The smoke test's "every layer names its files relatively" holds it.
+  includeStorePaths = false;
   includeNixDB = true;
 
+  # The store and its database belong to the contract user, as a single-user install's do, so
+  # its Nix can add packages without root.
   fakeRootCommands = guest.fakeRootCommands + ''
+    mkdir -p ./nix/store
+    xargs cp -a -t ./nix/store < ${closure}/store-paths
     chown -R -h ${toString guest.uid}:${toString guest.gid} ./nix
   '';
 
