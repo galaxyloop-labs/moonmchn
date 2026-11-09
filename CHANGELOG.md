@@ -15,6 +15,7 @@
 
 ### Chores
 
+- README, SECURITY policy, and ROADMAP
 - CHANGELOG
 - Enforce strict Rust idioms with deny-level lints (@jodosha)
 - Bump smolmachines to 1.32.2 (@jodosha)

@@ -1,134 +1,91 @@
-# Moon MCHN
+# Moon MCHN (Moon Machine)
 
-Moon MCHN library and command-line interface.
+[![CI](https://github.com/galaxyloop-labs/moonmchn/actions/workflows/ci.yml/badge.svg)](https://github.com/galaxyloop-labs/moonmchn/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/galaxyloop-labs/moonmchn?include_prereleases&sort=semver)](https://github.com/galaxyloop-labs/moonmchn/releases)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/galaxyloop-labs/moonmchn/badge)](https://scorecard.dev/viewer/?uri=github.com/galaxyloop-labs/moonmchn)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-orange?logo=rust)](Cargo.toml)
+[![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
+[![Platforms: macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](#quick-start)
+[![GitHub stars](https://img.shields.io/github/stars/galaxyloop-labs/moonmchn?style=flat)](https://github.com/galaxyloop-labs/moonmchn/stargazers)
 
-The library is the product; the `mchn` binary is a thin wrapper over it.
-[SPEC.md](SPEC.md) describes the detailed behavior.
+MicroVMs for the AI era.
 
-## Workspace
+Moon MCHN offers VMs to run AI agents and assistants, or to use as a general-purpose development tool.
 
-- `crates/moonmchn`: application-owned configuration types, TOML serialization,
-  host recommendations, setup, the daemon, and the `Engine` and `Machine` traits
-  that machine backends implement. It does not depend on a machine SDK or CLI
-  parser.
-- `crates/moonmchn-smolmachines`: converts Moon MCHN configuration into
-  `smolmachines` SDK types and implements `Engine` and `Machine` with the SDK. It
-  resolves image digests, from a registry or a `docker save` archive, and builds the
-  engine client's command for `exec` and `shell` sessions. Depends on `moonmchn`,
-  never the reverse.
-- `crates/moonmchn-cli`: the `mchn` executable, which runs the daemon with
-  the smolmachines engine.
+While we want to provide a secure environment, be aware that Moon MCHN is an early release. Read [CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md) to learn more about the present and the future of this project.
 
-## CLI
+## Why
+
+Attackers now go after developers' machines: a worm in an npm package, malware in the git hooks of a fake job assignment, a prompt injection that steers a coding agent. Moon MCHN runs the code you'd rather not run as yourself in a Linux microVM, on macOS and Linux.
+
+Each machine comes with:
+
+- **Its own kernel.** A microVM with its own Linux kernel, on the host's hardware virtualization. Code inside sees the machine, and your files stay out of its reach.
+- **Nothing of yours inside unless you list it.** A fresh configuration shares no host files. You name the directories a machine may see, read-only or writable.
+- **Rules on the host.** Resources, mounts and network rules live on the host, out of the machine's reach, so an agent inside cannot switch them off.
+- **Pinned images.** A machine boots an OCI image pinned to the digest it resolved to, so the same spec boots the same content. Registry images need no Docker on the host.
+
+## Quick start
+
+You need an Apple Silicon Mac or Linux with KVM (`/dev/kvm`), and the Rust toolchain:
 
 ```sh
+git clone https://github.com/galaxyloop-labs/moonmchn
+cd moonmchn
 cargo install --path crates/moonmchn-cli
-mchn --help
-mchn version                               # prints v{version} from the workspace, e.g. v0.1.0
-mchn setup                                 # creates ~/.config/moonmchn/config.toml
-mchn daemon start                          # starts the daemon in the background
-mchn daemon status                         # prints the daemon's pid and version
-mchn daemon stop [--force]                 # stops the daemon; --force also stops every machine
-mchn start <name> [--image <ref|archive>]  # boots a machine from config.toml and an image
-mchn stop <name>                           # stops a machine and discards its disks
-mchn status [-e] <name>                    # prints its state; -e adds its spec
-mchn list                                  # prints one line per machine
-mchn exec [--no-tty] <name> -- <command>…  # runs a command in a machine
-mchn shell <name>                          # opens a login shell in a machine
+mchn setup                 # run once; writes ~/.config/moonmchn/config.toml, sized to this host
+mchn daemon start          # starts the daemon in the background
+mchn start dev             # boots a machine named dev from the official image
+mchn shell dev             # opens a shell in it
+mchn exec dev -- uname -a  # runs one command in it
+mchn stop dev              # stops it and discards its disk
+mchn --help                # shows all the commands
 ```
 
-`mchn setup` writes host-aware machine defaults, and leaves an existing file
-untouched unless you pass `--force`. The daemon runs on Linux and macOS; `daemon start`
-and `daemon stop` succeed when the daemon is already in the requested state.
-`daemon stop` refuses while machines run, unless you pass `--force`. Machine commands
-talk to the daemon, so start it first.
+## What it protects, and what it does not yet
 
-`mchn start` boots the official Moon MCHN image unless `--image` names another:
-a registry reference that starts with its host, or a `docker save` archive. A
-private image boots by its digest, `--image <repository>@sha256:<digest>`, with the
-engine's registries file holding the credentials; see
-[SPEC.md](SPEC.md#images).
+Moon MCHN keeps out of a machine's reach:
 
-Configuration lives in `$XDG_CONFIG_HOME/moonmchn` and the daemon's state in
-`$XDG_STATE_HOME/moonmchn`, falling back to `~/.config/moonmchn` and
-`~/.local/state/moonmchn` when those variables are unset. `MOONMCHN_HOME`
-overrides both and keeps everything in one directory.
+- Your files outside the mounts you list: keys, credentials, other projects.
+- Services on your host: no machine reaches them, whatever the network rules say.
 
-## Library
+Not yet:
 
-```toml
-[dependencies]
-moonmchn = { path = "../moonmchn/crates/moonmchn" }
-toml = "1.1" # Only needed if your application parses TOML directly.
-```
+- **What you hand in.** A mounted directory is the machine's to read and change.
+- **The network.** Network rules are still early: in 0.1.0, `setup` starts with every host allowed, for you to narrow, and DNS queries pass unchecked. In a future version, the [egress firewall](ROADMAP.md) will check every connection and DNS query, and deny by default.
+- **The VM process.** Under the 0.1.0 engine, the process that runs the VM has your user's permissions, so a guest that escaped the VM would get them. Confining that process with Seatbelt on macOS and Landlock on Linux is next on the [roadmap](ROADMAP.md).
 
-```rust
-println!("{}", moonmchn::VERSION); // inherited from [workspace.package]
-```
+[Known limitations](SPEC.md#known-limitations) lists the rest.
 
-The same setup operation is available as `moonmchn::setup(force)`, returning
-the written configuration path or a `moonmchn::Error`. Configuration selection
-and serialization also live in the library:
+## Use it as a library
 
-```rust
-let config = moonmchn::Config::recommended()?;
-let contents = config.to_toml()?;
-let config: moonmchn::Config = toml::from_str(&contents)?;
-```
-
-Machine backends are pluggable; [SPEC.md](SPEC.md#machine-backends) describes how
-to add one.
-
-### smolmachines adapter
-
-Applications using this backend also add:
-
-```toml
-[dependencies]
-moonmchn-smolmachines = { path = "../moonmchn/crates/moonmchn-smolmachines" }
-```
-
-Convert at the backend boundary, after loading or selecting your configuration. A
-machine's spec holds that configuration's settings and the image to boot, pinned to
-the digest the engine resolves it to:
-
-```rust
-use moonmchn::image::Image;
-use moonmchn::machine::{self, Engine as _};
-
-let moonmchn::Config { mounts, resources, egress } = config;
-let image = Image::default();
-let digest = moonmchn_smolmachines::Engine::image_digest(&image)?;
-let spec = machine::Spec {
-    image: machine::ImageSpec {
-        name: image,
-        digest: Some(digest),
-    },
-    mounts,
-    resources,
-    egress,
-};
-let machine_config =
-    moonmchn_smolmachines::machine_config(spec, "my-unique-machine");
-// Pass machine_config to smolmachines::Machine::create when ready to launch.
-```
+The library is the product, and `mchn` is a thin wrapper over it. An application can use the `moonmchn` crate to write configuration, run the daemon and drive machines, with any engine that implements its `Engine` and `Machine` traits. [Library](SPEC.md#library) and [Machine backends](SPEC.md#machine-backends) describe the API.
 
 ## Development
 
-Requires the Rust toolchain plus `cargo-audit`, `cargo-deny` and
-`cargo-outdated` (all provided by the Nix dev shell).
+- `crates/moonmchn`: the library, with configuration, setup, the daemon, and the `Engine` and `Machine` traits.
+- `crates/moonmchn-smolmachines`: the engine adapter for smolmachines.
+- `crates/moonmchn-cli`: the `mchn` binary.
+
+Development needs the Rust toolchain plus `cargo-audit`, `cargo-deny` and `cargo-outdated`, all provided by the Nix dev shell.
 
 ```sh
-make help   # list targets
-make ci     # fmt-check, check, lint, test, doc across the workspace
-make audit  # RustSec advisories
-make deny   # licenses, bans, advisories, sources
-
-cargo test -p moonmchn                 # core library without a backend
-cargo test -p moonmchn-smolmachines    # adapter mappings
-cargo test -p moonmchn-cli             # CLI unit and integration tests
-cargo run -p moonmchn-cli -- --help
+make help   # lists the targets
+make ci     # fmt-check, check, lint, test and doc across the workspace
+make audit  # checks dependencies against the RustSec advisory database
+make deny   # checks dependency licenses, bans, advisories and sources
 ```
+
+The code holds itself to strict rules:
+- `unsafe` is forbidden in every crate of the workspace, and Clippy warnings fail `make ci`.
+- Every dependency is pinned in `Cargo.lock`. `deny.toml` lists the licenses allowed and denies unknown registries and git sources.
+- Dependabot proposes dependency updates weekly, and OpenSSF Scorecard rates the repository's supply-chain practices on every push to `main`.
+- GitHub Actions are pinned to commit SHAs.
+
+## Security
+
+Report vulnerabilities privately through [GitHub's private vulnerability reporting](https://github.com/galaxyloop-labs/moonmchn/security/advisories/new). [SECURITY.md](SECURITY.md) covers what to include, what happens next, and what is in scope.
 
 ## License
 
