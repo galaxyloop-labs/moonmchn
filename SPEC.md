@@ -871,13 +871,20 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
   engine, until `mchn stop` removes it and `mchn start` boots afresh.
 - The announcement adds up to 5 seconds to every stop.
 - The egress lists judge TCP flows alone: DNS resolves freely, and every other UDP
-  datagram is denied.
+  datagram is denied. So DNS is a way out whatever the lists say, `allow = []`
+  included: a guest hands data to whoever runs a domain's nameservers through the
+  names it queries, and gets data back in the answers. No log line names a query.
 - A daemon killed outright leaves its machines running with every flow denied, until
   the next `daemon start` reloads their tokens. That daemon refuses to start while
   another process holds its port and a machine depends on it.
 - A claimed name that does not resolve to the dialed address is dropped, and the flow
   is judged without a name: a guest whose resolver disagrees with the host's, through
   its hosts file for example, loses its names.
+- A claimed name counts whenever the host resolves it to the dialed address, so a
+  guest reaches a denied server's address under a name of its own choosing: its own
+  domain, or a wildcard DNS service such as nip.io. A hostname in `deny` stops a
+  guest that names its target truthfully; against a hostile one, `deny` needs the
+  address as an IP literal, or `allow` needs to leave the address out.
 - A flow without a name needs an IP literal in `allow`, unless `allow` holds a bare `*`
   and `deny` no hostname: under `allow = ["*"]`, one hostname in `deny` turns away plain
   HTTP, SSH and every other protocol that sends no TLS hello first.
