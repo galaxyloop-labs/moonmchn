@@ -15,7 +15,7 @@ Development needs Nix with flakes. If you use `direnv`, `cd`'ing in the director
 make help   # lists the targets
 make fmt    # formats the Rust and the Nix code
 make ci     # fmt-check, nix-fmt-check, workflows-check, check, lint, test and doc across the workspace
-make audit  # checks dependencies against the RustSec advisory database
+make audit  # checks both lockfiles, the workspace's and fuzz/'s, against the RustSec advisory database
 make deny   # checks dependency licenses, bans, advisories and sources
 make fuzz   # fuzzes each target under fuzz/ for a minute; FUZZ_SECONDS=600 for longer
 ```
@@ -36,7 +36,7 @@ The Fuzz workflow runs `make fuzz` on pull requests, on pushes to `main`, and fo
 The code holds itself to strict rules:
 
 - `unsafe` is forbidden in every crate of the workspace, and Clippy warnings fail `make ci`.
-- Every dependency is pinned in `Cargo.lock`. `deny.toml` lists the licenses allowed and denies unknown registries and git sources.
+- Every dependency is pinned in `Cargo.lock`. `deny.toml` lists the licenses allowed and denies unknown registries and git sources. The Dependencies workflow runs `make deny` and `make audit` on pull requests, on pushes to `main`, and every week, so an advisory against an unchanged lockfile shows within a week.
 - Dependabot proposes dependency updates weekly, and OpenSSF Scorecard rates the repository's supply-chain practices on every push to `main`.
 - GitHub Actions are pinned to commit SHAs.
 

@@ -1,0 +1,42 @@
+# Checks the dependencies with `make deny` and `make audit`, inside the Nix dev shell: licenses,
+# bans, sources and advisories per deny.toml, then both lockfiles against the RustSec database.
+# Both read lockfiles alone, so one Linux job covers every platform. The weekly run catches an
+# advisory published against a `Cargo.lock` that has not changed.
+name: Dependencies
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # Tuesdays, 02:37 UTC.
+    - cron: "37 2 * * 2"
+
+# A new push to a pull request cancels its running checks; every run on `main` finishes.
+concurrency:
+  group: dependencies-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    name: make deny audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      - run: nix develop --command make deny
+
+      # Runs after a failed `deny` too, so one run reports every finding.
+      - if: ${{ !cancelled() }}
+        run: nix develop --command make audit

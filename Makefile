@@ -76,8 +76,9 @@ release: ## Optimised build of all workspace crates
 	$(CARGO) build --workspace --release
 
 .PHONY: audit
-audit: ## Check dependencies against the RustSec advisory database
+audit: ## Check both lockfiles, the workspace's and fuzz/'s, against the RustSec advisory database
 	$(CARGO) audit
+	$(CARGO) audit --file fuzz/Cargo.lock
 
 .PHONY: deny
 deny: ## Check licenses, bans, advisories and sources (deny.toml)
