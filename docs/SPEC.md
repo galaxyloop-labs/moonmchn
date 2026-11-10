@@ -676,7 +676,9 @@ spec with the request, every field but the digest, which counts only when the
 request names one. So it needs no network and treats a moved tag as the same
 machine. `mchn stop` then `mchn start` boots the tag's new content.
 
-The daemon asks registries anonymously, over `https`. A private image fails to
+The daemon asks registries anonymously, over `https`, redirects and token endpoints
+included: a plain `http` URL fails before any request goes out, since the digest the
+answer names pins what the machine boots. A private image fails to
 resolve: ghcr.io refuses the anonymous token with `403 Forbidden`, and other
 registries may answer `401`. Boot it by its digest instead, which needs no request:
 `--image <repository>@sha256:<digest>`. The engine pulls it with the credentials in
@@ -870,7 +872,8 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
   for the pull (see [Images](#images)).
 - A registry that omits `Docker-Content-Digest` on `HEAD`, or answers
   `WWW-Authenticate: Basic`, cannot be resolved, nor can a registry over plain
-  `http`.
+  `http`, one that redirects to plain `http`, or one whose token realm is an
+  `http` URL.
 - A bare reference such as `alpine` is refused: write its registry host.
 - A local archive needs `crane`, `docker` or `podman` on the host for the engine to
   flatten it, and is read in full whenever a machine boots from it. The engine

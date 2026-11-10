@@ -104,14 +104,10 @@ pub(crate) fn digest(image: &Image) -> Result<Digest> {
                 return Ok(digest.clone());
             }
 
-            let client = Client::builder()
-                .timeout(REGISTRY_TIMEOUT)
-                .build()
-                .map_err(|error| {
-                    let message =
-                        format!("the HTTP client could not start: {}", request_error(error));
-                    unresolved(reference.as_str(), message)
-                })?;
+            let client = registry_client().map_err(|error| {
+                let message = format!("the HTTP client could not start: {}", request_error(error));
+                unresolved(reference.as_str(), message)
+            })?;
             // References name Docker Hub `docker.io`, which serves no registry API.
             let host = if reference.host() == DOCKER_HUB {
                 DOCKER_HUB_REGISTRY
@@ -121,6 +117,16 @@ pub(crate) fn digest(image: &Image) -> Result<Digest> {
             registry_digest(&client, &format!("{HTTPS}{host}"), reference)
         }
     }
+}
+
+/// Builds the client of a registry lookup. It refuses every `http://` URL, a redirect's and a
+/// token realm's included: the digest it reads pins the machine's image, so a plain HTTP hop
+/// would let whoever sits on it pick the image.
+fn registry_client() -> reqwest::Result<Client> {
+    Client::builder()
+        .timeout(REGISTRY_TIMEOUT)
+        .https_only(true)
+        .build()
 }
 
 /// Reads the digest of `archive` from its `manifest.json`.
@@ -403,6 +409,26 @@ mod tests {
         // The fake speaks plain HTTP, so the TLS handshake fails before any request.
         let url = format!(
             "https://127.0.0.1:{}/v2/org/name/manifests/latest",
+            fake.port
+        );
+        assert!(
+            matches!(&error, Error::ImageResolve { message, .. }
+                if message.ends_with(&format!(" from {url}"))),
+            "{error}"
+        );
+        assert!(fake.token_requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_registry_client_sends_nothing_over_plain_http() {
+        let fake = FakeRegistry::start(&format!("sha256:{}", "b".repeat(64)));
+        let base = format!("http://127.0.0.1:{}", fake.port);
+        let reference = reference(&format!("127.0.0.1:{}/org/name:latest", fake.port));
+
+        let error = registry_digest(&registry_client().unwrap(), &base, &reference).unwrap_err();
+
+        let url = format!(
+            "http://127.0.0.1:{}/v2/org/name/manifests/latest",
             fake.port
         );
         assert!(
