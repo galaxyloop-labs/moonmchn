@@ -88,9 +88,9 @@ pub trait Machine: Sized {
     /// then still be paused.
     fn resume(&self) -> Result<()>;
 
-    /// Runs `command` in the guest as the image's user, with no input and its output
-    /// discarded, until it exits or `timeout` passes, and returns its exit status. The
-    /// call itself returns by then, whether the engine answered or not.
+    /// Runs `command` in the guest as the sessions' user, uid 1000, with no input and its
+    /// output discarded, until it exits or `timeout` passes, and returns its exit status.
+    /// The call itself returns by then, whether the engine answered or not.
     ///
     /// # Errors
     ///

@@ -14,7 +14,7 @@ use moonmchn::{Error, Result};
 
 use crate::gateway::Gateway;
 use crate::machine_config;
-use crate::session::{MACHINE, NAME_FLAG};
+use crate::session::{GUEST_USER, MACHINE, NAME_FLAG};
 
 /// The `machine` subcommand that boots a created machine.
 const START: &str = "start";
@@ -84,7 +84,10 @@ impl machine::Machine for Machine {
     fn exec(&self, command: &[String], timeout: Duration) -> Result<i32> {
         let stream = self
             .0
-            .exec_stream(command, ExecOptions::new().timeout(timeout))
+            .exec_stream(
+                command,
+                ExecOptions::new().user(GUEST_USER).timeout(timeout),
+            )
             .map_err(|error| engine_error(&error))?;
         // Taken before the stream moves into `within`'s thread, so the client can still be
         // killed from here once the time runs out.
