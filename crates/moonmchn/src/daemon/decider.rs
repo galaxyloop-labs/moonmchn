@@ -323,7 +323,7 @@ async fn read_flow<G: Gateway>(
 /// the TLS `ClientHello` they hold, which `client_hello` reads, as rustls gives it; `bind_name`
 /// normalizes it. A hello without SNI, and bytes that hold no hello, plain HTTP included, claim
 /// nothing.
-fn claimed_name(opening: &[u8]) -> Option<String> {
+pub(super) fn claimed_name(opening: &[u8]) -> Option<String> {
     let accepted = client_hello(opening)?;
     accepted.client_hello().server_name().map(str::to_owned)
 }

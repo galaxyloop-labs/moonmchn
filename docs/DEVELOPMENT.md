@@ -17,7 +17,19 @@ make fmt    # formats the Rust and the Nix code
 make ci     # fmt-check, nix-fmt-check, workflows-check, check, lint, test and doc across the workspace
 make audit  # checks dependencies against the RustSec advisory database
 make deny   # checks dependency licenses, bans, advisories and sources
+make fuzz   # fuzzes each target under fuzz/ for a minute; FUZZ_SECONDS=600 for longer
 ```
+
+## Fuzzing
+
+`fuzz/` holds the [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for the bytes the daemon reads from outside:
+
+- `preamble`: the request an engine's gateway writes before each flow, which the decider reads from any local process that connects. Besides crashes, it checks the contract `Gateway::decode_flow` documents: each `Partial` asks for more bytes than it holds, and a complete request needs every byte read.
+- `claimed_name`: the opening bytes a guest sends, read as a TLS `ClientHello`, and the SNI name normalized from it.
+
+`fuzz/` is a Cargo workspace of its own, with its own `Cargo.lock`, since `cargo fuzz` builds every crate in it with its instrumentation and `--cfg fuzzing`. That cfg exposes `moonmchn::daemon::fuzzing`, the entry points into the decider's private code; no other build has it. The targets run on the flake's stable Rust with `--sanitizer none`: the crates forbid `unsafe`, and AddressSanitizer needs nightly.
+
+The Fuzz workflow runs `make fuzz` on pull requests, on pushes to `main`, and for ten minutes per target every week, keeping the corpus in the Actions cache. A failing input lands in `fuzz/artifacts/<target>/`, and in the run's artifacts on CI. Replay it with `cargo fuzz run --sanitizer none <target> <file>`.
 
 ## Rules
 

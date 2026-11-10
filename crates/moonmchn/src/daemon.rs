@@ -12,6 +12,9 @@ pub mod client;
 pub use client::Client;
 mod decider;
 mod egress;
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing;
 mod instance;
 mod launcher;
 mod machines;

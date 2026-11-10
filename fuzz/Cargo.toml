@@ -1,0 +1,38 @@
+[package]
+name = "moonmchn-fuzz"
+version = "0.0.0"
+edition = "2024"
+description = "Fuzz targets for the bytes a guest or a local process can send the daemon"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+moonmchn = { path = "../crates/moonmchn" }
+moonmchn-smolmachines = { path = "../crates/moonmchn-smolmachines" }
+
+# A workspace of its own: `cargo fuzz` builds every crate here with its instrumentation flags and
+# `--cfg fuzzing`, which the main workspace's builds must not share.
+[workspace]
+members = ["."]
+
+# Line tables, so a crash's backtrace names the lines.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "preamble"
+path = "fuzz_targets/preamble.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "claimed_name"
+path = "fuzz_targets/claimed_name.rs"
+test = false
+doc = false
+bench = false

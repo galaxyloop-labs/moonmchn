@@ -1,0 +1,61 @@
+# Fuzzes every target under `fuzz/` with `make fuzz`, inside the Nix dev shell: a minute each on
+# pull requests and pushes to `main`, ten minutes each in the weekly run. The corpus carries over
+# from run to run through the cache, and a failing input is kept as an artifact to replay with
+# `cargo fuzz run --sanitizer none <target> <file>`.
+name: Fuzz
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # Wednesdays, 04:23 UTC.
+    - cron: "23 4 * * 3"
+
+# A new push to a pull request cancels its running fuzzing; every run on `main` finishes.
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: make fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      # The corpus the last run on `main` left. Pull requests read it, `main` writes it.
+      - id: corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - run: nix develop --command make fuzz
+        env:
+          FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '600' || '60' }}
+
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/
+          key: ${{ steps.corpus.outputs.cache-primary-key }}

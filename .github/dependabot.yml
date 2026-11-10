@@ -3,8 +3,12 @@
 # updates skip the wait.
 version: 2
 updates:
+  # `/fuzz`: the fuzz targets' own lockfile, which pins the crates' dependencies too, at the
+  # versions the main one does.
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /fuzz
     schedule:
       interval: weekly
     cooldown:

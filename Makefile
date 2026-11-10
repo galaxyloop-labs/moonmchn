@@ -1,4 +1,5 @@
 CARGO ?= cargo
+RUSTFMT ?= rustfmt
 NIX ?= nix
 CLIFF ?= git-cliff
 ACTIONLINT ?= actionlint
@@ -23,11 +24,13 @@ version: ## Print the release version from Cargo.toml
 .PHONY: fmt
 fmt: ## Format all code, Rust and Nix
 	$(CARGO) fmt --all
+	$(RUSTFMT) --edition 2024 $(FUZZ_SOURCES)
 	$(NIX) fmt
 
 .PHONY: fmt-check
 fmt-check: ## Fail if any Rust file is not formatted
 	$(CARGO) fmt --all --check
+	$(RUSTFMT) --edition 2024 --check $(FUZZ_SOURCES)
 
 .PHONY: nix-fmt-check
 nix-fmt-check: ## Fail if any Nix file is not formatted
@@ -97,6 +100,31 @@ changelog: ## Regenerate CHANGELOG.md from git history (git-cliff, cliff.toml)
 	else \
 		$(CLIFF) --tag "v$$version" --output CHANGELOG.md; \
 	fi
+
+# The fuzz targets under fuzz/, a workspace of its own, and the seeds each starts from. `cargo fuzz`
+# keeps the inputs that reach new code in fuzz/corpus/<target>, and a failing one in
+# fuzz/artifacts/<target>. `cargo fmt --all` covers only the main workspace, so `fmt` names these.
+FUZZ_TARGETS := preamble claimed_name
+FUZZ_SOURCES = $(wildcard fuzz/fuzz_targets/*.rs)
+FUZZ_SEEDS_preamble := fuzz/seeds/preamble
+FUZZ_SEEDS_claimed_name := crates/moonmchn/src/daemon/decider/testdata
+FUZZ_SECONDS ?= 60
+# The longest request a gateway writes: an IPv6 preamble's 93 bytes, then 8 KiB of opening bytes.
+FUZZ_MAX_LEN := 8285
+# Seconds one input may run before it counts as a hang.
+FUZZ_INPUT_TIMEOUT := 10
+FUZZ_RUNS := $(addprefix fuzz-,$(FUZZ_TARGETS))
+
+# `--sanitizer none`: the crates forbid `unsafe`, so AddressSanitizer would watch only their
+# dependencies, and it needs nightly Rust where the flake pins stable. Panics, hangs, runaway
+# memory and failed debug assertions still fail a run.
+.PHONY: fuzz $(FUZZ_RUNS)
+fuzz: $(FUZZ_RUNS) ## Fuzz each target for FUZZ_SECONDS seconds (default 60), from its seeds and corpus
+
+$(FUZZ_RUNS): fuzz-%:
+	mkdir -p fuzz/corpus/$*
+	$(CARGO) fuzz run --sanitizer none $* fuzz/corpus/$* $(FUZZ_SEEDS_$*) -- \
+		-max_total_time=$(FUZZ_SECONDS) -max_len=$(FUZZ_MAX_LEN) -timeout=$(FUZZ_INPUT_TIMEOUT)
 
 # A default macOS terminal allows 256 open files per process. Under the higher
 # limit of CI runners and other shells, a test that runs out of descriptors on

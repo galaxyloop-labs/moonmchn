@@ -136,6 +136,7 @@
             pkgs.cargo-outdated
             pkgs.cargo-expand
             pkgs.cargo-flamegraph
+            pkgs.cargo-fuzz # `make fuzz`, with libFuzzer built by the shell's C++ compiler
             pkgs.git-cliff # Changelog generator
 
             # GitHub Actions: actionlint runs shellcheck on every `run:` block.

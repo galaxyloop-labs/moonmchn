@@ -1,0 +1,5 @@
+target/
+# What `cargo fuzz run` writes: the inputs it keeps, and the ones that failed.
+corpus/
+artifacts/
+coverage/
