@@ -98,6 +98,7 @@ pkgs.dockerTools.buildLayeredImage {
 
   config = {
     User = guest.user;
+    WorkingDir = guest.workingDir;
     Env = [
       "PATH=${profileBin}:/bin"
       "NIX_SSL_CERT_FILE=${caBundle}"

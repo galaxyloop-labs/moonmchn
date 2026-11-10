@@ -47,7 +47,8 @@ None.
 
 ## `default`
 
-- The guest contract: the `moonmchn` user (uid 1000, no password), its home, `/tmp`.
+- The guest contract: the `moonmchn` user (uid 1000, no password), its home as `WORKDIR`,
+  `/tmp`.
 - BusyBox with its full set of applets in `/bin`, and `/usr/bin/env`.
 - Single-user Nix owned by `moonmchn`, with `nix-command` and `flakes` on, and `nixpkgs`
   pinned to the image's own revision. A one-off install inside a machine:

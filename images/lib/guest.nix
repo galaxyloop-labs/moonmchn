@@ -1,5 +1,6 @@
 # The guest contract (docs/SPEC.md, Guest contract) that every Moon MCHN base image keeps: the
-# `moonmchn` user with no password and no privileged group, its home, and a shared `/tmp`.
+# `moonmchn` user with no password and no privileged group, its home as the working directory
+# where sessions start, and a shared `/tmp`.
 { pkgs }:
 let
   user = "moonmchn";
@@ -7,6 +8,7 @@ let
   gid = 1000;
   home = "/home/${user}";
   shell = "/bin/sh";
+  workingDir = home;
 
   # The password field of an account that has none: no password logs in.
   noPassword = "!";
@@ -45,6 +47,7 @@ in
     uid
     gid
     home
+    workingDir
     ;
 
   # Shell commands for `fakeRootCommands`: the account files and the directories the contract

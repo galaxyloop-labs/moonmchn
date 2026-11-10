@@ -11,14 +11,16 @@ use moonmchn::machine::GUEST_SHELL;
 
 use crate::engine::engine_error;
 
-/// The user every session runs as. The guest contract sets it as the image's USER; sessions
-/// name it anyway, so an image that breaks the contract fails the session and never hands out
-/// a root shell.
-const GUEST_USER: &str = "moonmchn";
-
-/// The home of [`GUEST_USER`] in the guest contract, where every session starts, as an `ssh`
-/// login would: the engine starts an `exec` in `/` by default.
-const GUEST_HOME: &str = "/home/moonmchn";
+/// The user and group every session and every announcement runs as, uid 1000 and gid 1000.
+/// The engine's agent reads a numeric user against the image's `/etc/passwd`: `moonmchn` in
+/// the official image, the image's own uid-1000 user elsewhere, and a nameless uid 1000 with
+/// `HOME=/` where none exists. So a session never fails on its user, and never runs as root.
+/// The group is named too, since a nameless uid 1000 would otherwise get group 0, root's.
+///
+/// The announcement names it because the image's USER can be root, busybox's is: its
+/// `kill -s HUP -1` would then reach every process in the guest. As uid 1000 it reaches
+/// only the sessions.
+pub(crate) const GUEST_USER: &str = "1000:1000";
 
 /// The shell's flag for a login shell, which reads the user's profile.
 const LOGIN_FLAG: &str = "-l";
@@ -34,9 +36,6 @@ pub(crate) const NAME_FLAG: &str = "--name";
 
 /// Sets the user the command runs as, joined to its value in one argument.
 const USER_FLAG: &str = "--user=";
-
-/// Sets the directory the command starts in, joined to its value in one argument.
-const WORKDIR_FLAG: &str = "--workdir=";
 
 /// Gives the command a terminal.
 const TTY_FLAG: &str = "--tty";
@@ -69,8 +68,8 @@ pub fn session(name: &str, command: &[String], tty: bool) -> Result<Command> {
 
 /// Returns the engine client's arguments for a session in machine `name`.
 ///
-/// The session runs as [`GUEST_USER`] in its home, with stdin attached, and with a terminal
-/// when `tty` is set. `command` passes through as argv, one argument per element, so nothing
+/// The session runs as [`GUEST_USER`], with stdin attached, and with a terminal when `tty` is
+/// set. It starts in the image's `WORKDIR`, `/` when the image sets none. `command` passes through as argv, one argument per element, so nothing
 /// splits it on spaces; an empty `command` opens a login shell.
 #[must_use]
 pub(crate) fn session_args(name: &str, command: &[String], tty: bool) -> Vec<String> {
@@ -80,7 +79,6 @@ pub(crate) fn session_args(name: &str, command: &[String], tty: bool) -> Vec<Str
         NAME_FLAG.into(),
         name.into(),
         format!("{USER_FLAG}{GUEST_USER}"),
-        format!("{WORKDIR_FLAG}{GUEST_HOME}"),
     ];
 
     if tty {
@@ -117,8 +115,7 @@ mod tests {
                 "exec",
                 "--name",
                 "alpha",
-                "--user=moonmchn",
-                "--workdir=/home/moonmchn",
+                "--user=1000:1000",
                 "--interactive",
                 "--",
                 "sh",
@@ -139,8 +136,7 @@ mod tests {
                 "exec",
                 "--name",
                 "alpha",
-                "--user=moonmchn",
-                "--workdir=/home/moonmchn",
+                "--user=1000:1000",
                 "--tty",
                 "--interactive",
                 "--",

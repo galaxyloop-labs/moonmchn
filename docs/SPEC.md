@@ -220,9 +220,10 @@ names a machine SDK:
   an `EgressEndpoint`, holds the decider's loopback address and the machine's token,
   64 hex digits its gateway presents with every flow; `attach(name)` reopens a handle
   by name; `status()` reports a `Status` (name, `State`, optional pid); `resume()`
-  resumes a paused machine's saved execution; `exec(command, timeout)` runs a command in the guest as the image's
-  user, with no input and its output discarded, and returns its exit status, giving
-  up once `timeout` passes; and `stop(self)` destroys the machine with its disks.
+  resumes a paused machine's saved execution; `exec(command, timeout)` runs a command
+  in the guest as the sessions' user, uid 1000, with no input and its output
+  discarded, and returns its exit status, giving up once `timeout` passes; and
+  `stop(self)` destroys the machine with its disks.
 - `Gateway` decodes the request the engine's gateway writes to the decider before
   each flow: `decode_flow(bytes)` answers `Decoded::Partial(len)` while the request
   needs more bytes, `Decoded::Complete(flow)` with the `Flow`'s token, destination and
@@ -593,7 +594,7 @@ on Linux and macOS and need a running daemon; they never start one.
 | `mchn status --extended x` | the block below | 0 |
 | `mchn list` | one `x  running (pid N)` line per machine, sorted by name; nothing when there are none | 0 |
 | `mchn exec x -- <command>…` | whatever the command prints; see [Sessions](#sessions) | the command's |
-| `mchn shell x` | a login shell as `moonmchn`, in `/home/moonmchn` | the shell's |
+| `mchn shell x` | a login shell as uid 1000, `moonmchn` in the official image, in the image's `WORKDIR` | the shell's |
 | `mchn status x`, `mchn exec x` or `mchn shell x` for an unknown name | `error: machine x not found` | 1 |
 | `mchn start Alpha` | `error: invalid machine name "Alpha": use lowercase letters, digits, '_', '.' and '-', starting with a letter or digit` | 1 |
 | `mchn start x`, with a bad pattern in `[egress]`, such as `allow = ["foo bar"]` or `deny = ["*"]` | `error: failed to parse …/config.toml as TOML: …`, naming the pattern and its rule: `invalid egress pattern "foo bar": labels contain letters, digits and '-', and cannot be empty` | 1 |
@@ -686,9 +687,15 @@ its registries file (see [Engine](#engine)).
 `mchn exec x -- <command>…` and `mchn shell x` ask the daemon for the
 machine, then replace the CLI with the engine's client, which carries the session:
 stdin, stdout and stderr pass through untouched, and the exit status is the
-command's. Both run as `moonmchn` in `/home/moonmchn`; `shell` opens a login
-shell, `sh -l`, with a terminal.
+command's. `shell` opens a login shell, `sh -l`, with a terminal.
 
+- Both run as uid 1000 and gid 1000, named by number, so a session never fails
+  on its user and never runs as root. The image's `/etc/passwd` gives that uid its
+  name, home and shell: `moonmchn` in the official image, an image's own uid-1000
+  user elsewhere, such as `node`, and a nameless uid 1000 with `HOME=/` in an
+  image without one, such as busybox or alpine.
+- Both start in the image's `WORKDIR`: `/home/moonmchn` in the official image,
+  and `/` in an image that sets none.
 - The command after `--` is argv end to end: nothing splits or quotes it, so
   `exec x -- sh -c 'a b'` passes `a b` as one argument. Pipes and redirects meant
   for the machine go through `sh -c`.
@@ -801,8 +808,10 @@ before `daemon start`.
 
 `mchn exec` and `mchn shell` run the engine's client found by the same rule,
 the SDK's `engine_cli()`, in the CLI's own environment: `SMOLVM` when set, else a
-compatible `smolvm` on `PATH`, else the pinned engine. Both run as `moonmchn` in
-`/home/moonmchn`.
+compatible `smolvm` on `PATH`, else the pinned engine. Both pass the engine
+`--user=1000:1000`, and no `--workdir`, so the engine starts them in the image's
+`WORKDIR` (see [Sessions](#sessions)). The announcement's `exec` runs as the
+same user.
 
 Every machine boots its image pinned to its recorded digest, with networking on, on
 virtio-net, and its flows judged by the decider (see [Egress](#egress)): the engine
@@ -821,14 +830,18 @@ Any image a machine boots must provide the following. The image is yours: built 
 published outside this repository, for `linux/arm64` and `linux/amd64`, and named by
 `--image`, or the official one, `Image::default()`.
 
-- A user `moonmchn` (uid 1000, home `/home/moonmchn`, shell `/bin/sh`), no
-  password, no `sudo`, no `doas`, no privileged groups.
+- A uid-1000 user, if any, with no password, no `sudo`, no `doas` and no
+  privileged groups: sessions and the announcement run as uid 1000, whatever its
+  name, and with none at all. The official image names it `moonmchn`, with home
+  `/home/moonmchn` and shell `/bin/sh`.
+- A `WORKDIR` the uid-1000 user can enter, or none: sessions start there, or in
+  `/`. The official image sets `/home/moonmchn`.
 - `sh`, `printf` and `tee` on the image's PATH, for the announcement; `kill`, which
-  ends the sessions, is `sh`'s builtin.
+  ends the sessions, is `sh`'s builtin. As uid 1000, its `kill -s HUP -1` reaches
+  uid 1000's processes, the sessions among them, and never root's, even when the
+  image's `USER` is root.
 - No ENTRYPOINT and no CMD, so the machine boots to the engine's agent and stays up.
   A long-lived one works too.
-- `USER moonmchn`, so an `exec` without `--user`, the announcement's included,
-  runs as `moonmchn`.
 - `/dev/pts` mounted, which the engine's guest init already does.
 
 ### Not implemented yet

@@ -47,6 +47,7 @@ absolute_entries() {
 
 expect "the contract user" "uid=1000(moonmchn) gid=1000(moonmchn) groups=1000(moonmchn)" as_user id moonmchn
 expect "the default user is moonmchn" "moonmchn" as_user id -un
+expect "sessions start in the home" "/home/moonmchn" as_user pwd
 expect "moonmchn has no password" "!" as_root sh -c "grep '^moonmchn:' /etc/shadow | cut -d: -f2"
 expect "the shadow file is root's alone" "0 600" as_user stat -c "%u %a" /etc/shadow
 # The engine reads the account files from outside the guest's root, where a symlink into
