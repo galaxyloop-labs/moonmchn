@@ -1,0 +1,51 @@
+# CodeQL's Rust analysis on pull requests, pushes to `main` and weekly, with the results in code
+# scanning. Rust needs no build step: CodeQL reads the source as it stands. Linux and macOS each
+# run, since code behind `cfg(target_os = ...)` is analyzed only on its own platform.
+name: CodeQL
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "41 3 * * 1"
+
+# A new push to a pull request cancels its running analysis; every run on `main` finishes.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL rust (${{ matrix.platform.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: linux
+            runner: ubuntu-24.04
+          - os: macos
+            runner: macos-15
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    permissions:
+      # Uploads the results to code scanning.
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: rust
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          # One category per platform, so the macOS upload does not replace the Linux one.
+          category: /language:rust/os:${{ matrix.platform.os }}
