@@ -5,6 +5,7 @@
 [![CI](https://github.com/galaxyloop-labs/moonmchn/actions/workflows/ci.yml/badge.svg)](https://github.com/galaxyloop-labs/moonmchn/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/galaxyloop-labs/moonmchn?include_prereleases&sort=semver)](https://github.com/galaxyloop-labs/moonmchn/releases)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/galaxyloop-labs/moonmchn/badge)](https://scorecard.dev/viewer/?uri=github.com/galaxyloop-labs/moonmchn)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16520/badge)](https://www.bestpractices.dev/projects/16520)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust 1.99+](https://img.shields.io/badge/rust-1.99%2B-orange?logo=rust)](Cargo.toml)
 [![Platforms: macOS and Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)](#quick-start)
