@@ -28,6 +28,8 @@ The code holds itself to strict rules:
 - Dependabot proposes dependency updates weekly, and OpenSSF Scorecard rates the repository's supply-chain practices on every push to `main`.
 - GitHub Actions are pinned to commit SHAs.
 
+[GUIDELINES.md](GUIDELINES.md) lists the rules for writing the Rust code itself.
+
 ## Verify a release
 
 Each [release](https://github.com/galaxyloop-labs/moonmchn/releases) carries an `mchn` archive per platform and a `SHA256SUMS` file, all with a signed build attestation that names this repository and the workflow that built them:
