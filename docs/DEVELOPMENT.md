@@ -50,4 +50,4 @@ Each [release](https://github.com/galaxyloop-labs/moonmchn/releases) carries an 
 gh attestation verify mchn-v0.1.0-aarch64-darwin.tar.gz --repo galaxyloop-labs/moonmchn
 ```
 
-The crates on crates.io publish from the same workflow through Trusted Publishing.
+The crates on crates.io publish from the same workflow through Trusted Publishing. A job without credentials builds and verifies them first, and the job holding the publishing token uploads them with `--no-verify`, so no dependency's build script or proc-macro runs where it could read that token.

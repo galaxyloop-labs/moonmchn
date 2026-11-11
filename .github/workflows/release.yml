@@ -8,6 +8,13 @@ on:
     tags:
       - "v*.*.*"
 
+# One release at a time, so two tags never publish to crates.io at once. A running release is
+# never cancelled, since a crates.io upload cannot be taken back halfway; a waiting one is
+# cancelled when a newer tag queues, and needs a rerun.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -49,6 +56,27 @@ jobs:
           fi
         env:
           TAG: ${{ github.ref_name }}
+
+  # Packages and builds every crate, so each dependency's build script and proc-macro runs here,
+  # on purpose, in a job with no registry token and no `id-token: write` to read. `publish` then
+  # uploads with `--no-verify` and builds nothing.
+  #
+  # Both jobs check out the commit that triggered the run, since checkout fails when a tag moved
+  # after the push. `--locked` and `flake.lock` pin the package inputs and the toolchain, so the
+  # crates `publish` packages again are the ones built here.
+  verify:
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+
+      - run: nix develop --command cargo package --workspace --locked
 
   # `nix build .#mchn`, which `flake.lock` pins to the dev shell's Rust. The flake keeps /nix/store
   # out of the binary; the check below fails the job if one reference slips in.
@@ -154,12 +182,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
 
-  # Waits for the binaries, so a platform that fails to build stops the release before the
-  # irreversible step. Trusted Publishing exchanges this job's OIDC (OpenID Connect) identity for
-  # a short-lived crates.io token; the crates.io side lists this repository, this workflow file
-  # and the `release` environment per crate.
+  # Waits for `verify`, the binaries and the GitHub release, so a failed check build, a platform
+  # that fails to build or a failed release stops the run before the irreversible step. No dependency code runs here: any step of this
+  # job can request the publishing token, so the upload builds nothing. Trusted Publishing
+  # exchanges this job's OIDC (OpenID Connect) identity for a short-lived crates.io token; the
+  # crates.io side lists this repository, this workflow file and the `release` environment per
+  # crate.
   publish:
-    needs: [check, binaries]
+    needs: [check, verify, binaries, release]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
@@ -178,6 +208,11 @@ jobs:
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
       # Publishes in dependency order and waits for each crate to reach the index.
-      - run: nix develop --command cargo publish --workspace --locked
+      #
+      # Security: `--no-verify` keeps the publishing token away from third-party code. Without it,
+      # cargo builds every crate again before uploading, and each dependency's build script and
+      # proc-macro runs with the token in its environment, free to read it and publish under our
+      # name. The `verify` job runs that build with no token in reach.
+      - run: nix develop --command cargo publish --workspace --locked --no-verify
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
