@@ -310,6 +310,62 @@ fn machine_start_rejects_a_missing_archive() {
 }
 
 #[test]
+fn machine_start_hides_docker_logins_from_the_engine() {
+    // Goes with the `hide_docker_logins` HACK in `launch()`: remove both once the libkrun
+    // migration lands. A stale `docker login` the engine reads makes ghcr.io refuse even a
+    // public image.
+    let runtime = Runtime::new();
+    runtime.mchn().arg("setup").assert().success();
+    // The shell's Docker configuration, holding a ghcr.io login.
+    let docker = runtime.dir.path().join("docker");
+    std::fs::create_dir(&docker).unwrap();
+    std::fs::write(
+        docker.join("config.json"),
+        r#"{"auths":{"ghcr.io":{"auth":"c3RhbGU6bG9naW4="}}}"#,
+    )
+    .unwrap();
+    // A stand-in for the engine, reached through the SDK's `SMOLVM` override: `machine create`
+    // records whether it can read that login, then fails, so no machine is left behind.
+    let record = runtime.dir.path().join("create.log");
+    let engine = runtime.dir.path().join("smolvm");
+    std::fs::write(
+        &engine,
+        format!(
+            r#"#!/bin/sh
+if [ "$1 $2" = "machine create" ]; then
+    if [ -r "$DOCKER_CONFIG/config.json" ]; then echo visible; else echo hidden; fi >> '{}'
+    exit 1
+fi
+"#,
+            record.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&engine, Permissions::from_mode(0o755)).unwrap();
+
+    // The daemon inherits both variables from `daemon start`, as it would from a shell.
+    runtime
+        .mchn()
+        .args(["daemon", "start"])
+        .env("SMOLVM", &engine)
+        .env("DOCKER_CONFIG", &docker)
+        .assert()
+        .success();
+
+    // A pinned digest, so the daemon asks no registry before it reaches the engine.
+    let image = format!("ghcr.io/x/y@sha256:{}", "a".repeat(64));
+    runtime
+        .mchn()
+        .args(["start", "x", "--image", image.as_str()])
+        .assert()
+        .failure()
+        .code(1);
+
+    assert_eq!(std::fs::read_to_string(&record).unwrap(), "hidden\n");
+    drop(runtime);
+}
+
+#[test]
 fn machine_commands_need_the_daemon() {
     let runtime = Runtime::new();
 

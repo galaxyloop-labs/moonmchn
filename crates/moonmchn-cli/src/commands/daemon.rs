@@ -35,6 +35,8 @@ fn launch() -> anyhow::Result<String> {
     let exe = std::env::current_exe().context("failed to locate the mchn executable")?;
     let mut command = Command::new(exe);
     command.args(["daemon", "start", "--detached"]);
+    // TODO: remove this HACK once we have migrated to libkrun
+    moonmchn_smolmachines::hide_docker_logins(&mut command);
 
     Ok(match daemon::start(command)? {
         daemon::Start::Started { pid } => format!("Daemon started (pid {pid})"),

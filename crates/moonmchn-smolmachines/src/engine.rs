@@ -37,8 +37,8 @@ const BOOT_BINARY_ENV: &str = "SMOLVM_BOOT_BINARY";
 
 /// Names the directory the engine reads registry logins from: the `config.json` that
 /// `docker login` writes. A stale login makes the registry refuse even a public image
-/// (ghcr.io answers `DENIED: denied`), so `mediated_start` sets it to `NO_DOCKER_LOGINS`, and
-/// private images take their credentials from the engine's own registries file.
+/// (ghcr.io answers `DENIED: denied`), so `hide_docker_logins` sets it to `NO_DOCKER_LOGINS`,
+/// and private images take their credentials from the engine's own registries file.
 ///
 /// shortcut: relies on smolvm 1.32.4 taking any existing path here and treating an unreadable
 /// `config.json` as no login, recheck on every `smolmachines` bump.
@@ -47,6 +47,14 @@ const DOCKER_CONFIG_ENV: &str = "DOCKER_CONFIG";
 /// A path that exists, so the engine takes it in place of `~/.docker`, and that holds no
 /// `config.json`, so the engine finds no login there.
 const NO_DOCKER_LOGINS: &str = "/dev/null";
+
+/// Hides the host's `docker login` credentials from the engine commands that `command`'s
+/// process runs. Left alone, `machine create` probes a registry image with them and
+/// `machine start` pulls it with them. `mchn daemon start` applies this to the daemon, so
+/// every engine command the daemon runs inherits it.
+pub fn hide_docker_logins(command: &mut Command) {
+    command.env(DOCKER_CONFIG_ENV, NO_DOCKER_LOGINS);
+}
 
 /// Moon MCHN engine implementation for smolmachines.
 pub struct Engine;
@@ -222,8 +230,7 @@ fn confirms_absence(name: &str, message: &str) -> bool {
 ///
 /// ponytail: SDK 1.32.2 cannot pass `--mediated-egress` (smol-machines/smol#314). Like
 /// `session`, run the engine's CLI directly until `start_with_interceptor` carries the flag.
-/// Its errors are the SDK's, as that method's are. The swap must keep `DOCKER_CONFIG_ENV` at
-/// `NO_DOCKER_LOGINS`: the SDK runs the engine with the daemon's environment.
+/// Its errors are the SDK's, as that method's are, so the swap changes only the call in `start`.
 fn start_mediated(name: &str, binding: &EgressEndpoint) -> smolmachines::Result<()> {
     let engine_cli = smolmachines::engine_cli()?;
     let args = mediated_start_args(name, binding);
@@ -261,15 +268,13 @@ fn start_mediated(name: &str, binding: &EgressEndpoint) -> smolmachines::Result<
 }
 
 /// Returns the engine's `machine start` command with `args`, not yet run: `token` in its
-/// environment, Docker configuration pointed at `/dev/null`, the boot binary's variable
-/// removed, and no stdin. `start_mediated` runs it.
+/// environment, the boot binary's variable removed, and no stdin. `start_mediated` runs it.
 #[must_use]
 fn mediated_start(engine_cli: &Path, args: &[String], token: &str) -> Command {
     let mut command = Command::new(engine_cli);
     command
         .args(args)
         .env(INTERCEPTOR_TOKEN_ENV, token)
-        .env(DOCKER_CONFIG_ENV, NO_DOCKER_LOGINS)
         .env_remove(BOOT_BINARY_ENV)
         .stdin(Stdio::null());
     command
@@ -400,11 +405,11 @@ mod tests {
 
     #[test]
     fn the_engine_never_sees_docker_logins() {
-        // Left alone, the engine pulls with the host's `docker login`, and a stale login makes
-        // ghcr.io refuse even a public image. The swap to the SDK's `start_with_interceptor`
-        // must keep this.
-        let engine_cli = Path::new("path/to/smolvm");
-        let command = mediated_start(engine_cli, &[], "token");
+        // Left alone, the engine probes and pulls with the host's `docker login`, and a stale
+        // login makes ghcr.io refuse even a public image. The daemon's command carries this to
+        // every engine command, the SDK's `machine create` included.
+        let mut command = Command::new("path/to/mchn");
+        hide_docker_logins(&mut command);
         let docker_config = command.get_envs().find(|(key, _)| *key == "DOCKER_CONFIG");
 
         assert_matches!(docker_config, Some((_, Some(value))) if value == "/dev/null");
