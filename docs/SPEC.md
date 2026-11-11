@@ -824,7 +824,9 @@ every machine and ignores the key, so `status --extended` can show
 
 The engine pulls a private registry image with the credentials in its registries
 file, `~/.config/smolvm/config.toml`; `smolvm config registries init` writes an
-example.
+example. It never sees the logins `docker login` stores: the adapter starts it with
+`DOCKER_CONFIG=/dev/null`, whatever the daemon inherited, because a stale login
+makes a registry refuse even a public image (ghcr.io answers `DENIED: denied`).
 
 ### Guest contract
 
