@@ -466,8 +466,12 @@ Every machine's network goes through its engine's gateway, a userspace network s
 on the host and the guest's only way out. Before it dials anything, the gateway asks
 the daemon's egress decider about every TCP flow the guest opens, and it dials the
 destination itself only when the decider allows the flow; a denied flow is reset in the
-guest. The engine pulls a machine's image on the host before the guest boots, so a
-registry needs no entry in `allow`.
+guest. A machine's image comes from the engine's cache, which the engine fills by
+pulling in a throwaway VM of its own, whose flows the decider never sees. When the
+cache cannot supply the image, because filling it failed or `SMOLVM_IMAGE_SEEDS=0`
+turns it off, the guest pulls it itself, so `allow` must admit the registry and the
+host that serves its layers: `ghcr.io` and `pkg-containers.githubusercontent.com` for
+the official image.
 
 The decider listens on `127.0.0.1`, at the port in `egress/port` (see
 [State directory](#state-directory)). For each flow the gateway opens one connection,
@@ -877,13 +881,15 @@ published outside this repository, for `linux/arm64` and `linux/amd64`, and name
   `http`, one that redirects to plain `http`, or one whose token realm is an
   `http` URL.
 - A bare reference such as `alpine` is refused: write its registry host.
-- A local archive needs `crane`, `docker` or `podman` on the host for the engine to
-  flatten it, and is read in full whenever a machine boots from it. The engine
-  refuses an archive over 8 GiB.
+- A local archive needs only `tar` on the host, to read its `manifest.json`; the
+  engine flattens it inside the guest with its own `crane`. It is read in full
+  whenever a machine boots from it, and the engine refuses an archive over 8 GiB.
 - An archive's digest records what ran; booting the same content again needs the
   archive kept.
-- The first start of a machine pulls its image, which the engine does on the host
-  before the guest's network exists (see [Egress](#egress)).
+- The egress lists never judge the pull that fills the engine's image cache: the
+  engine runs it in a throwaway VM of its own. When the cache cannot supply an image,
+  the guest pulls it through the lists, and an `allow` without the registry fails the
+  start with `connection reset by peer` (see [Egress](#egress)).
 - A record written before images, without `digest` and `image`, fails to parse:
   `mchn status` fails on it, and `mchn exec` and `mchn shell` fail at the
   engine, until `mchn stop` removes it and `mchn start` boots afresh.
