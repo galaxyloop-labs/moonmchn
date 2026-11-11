@@ -1,5 +1,6 @@
 /target
 .direnv/
+docs/
 keys/
 *.qcow2
 result
