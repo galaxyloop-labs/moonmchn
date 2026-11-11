@@ -1,5 +1,6 @@
 //! Moon MCHN's machine traits, implemented with smolmachines.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -33,6 +34,27 @@ const INTERCEPTOR_TOKEN_ENV: &str = "SMOLVM_INTERCEPTOR_TOKEN";
 /// Ties the VM's life to the process that boots it, when set. `machine start` exits once the
 /// guest answers, so the variable is removed, as the SDK removes it from its own engine calls.
 const BOOT_BINARY_ENV: &str = "SMOLVM_BOOT_BINARY";
+
+/// Names the directory the engine reads registry logins from: the `config.json` that
+/// `docker login` writes. A stale login makes the registry refuse even a public image
+/// (ghcr.io answers `DENIED: denied`), so `hide_docker_logins` sets it to `NO_DOCKER_LOGINS`,
+/// and private images take their credentials from the engine's own registries file.
+///
+/// shortcut: relies on smolvm 1.32.4 taking any existing path here and treating an unreadable
+/// `config.json` as no login, recheck on every `smolmachines` bump.
+const DOCKER_CONFIG_ENV: &str = "DOCKER_CONFIG";
+
+/// A path that exists, so the engine takes it in place of `~/.docker`, and that holds no
+/// `config.json`, so the engine finds no login there.
+const NO_DOCKER_LOGINS: &str = "/dev/null";
+
+/// Hides the host's `docker login` credentials from the engine commands that `command`'s
+/// process runs. Left alone, `machine create` probes a registry image with them and
+/// `machine start` pulls it with them. `mchn daemon start` applies this to the daemon, so
+/// every engine command the daemon runs inherits it.
+pub fn hide_docker_logins(command: &mut Command) {
+    command.env(DOCKER_CONFIG_ENV, NO_DOCKER_LOGINS);
+}
 
 /// Moon MCHN engine implementation for smolmachines.
 pub struct Engine;
@@ -213,11 +235,7 @@ fn start_mediated(name: &str, binding: &EgressEndpoint) -> smolmachines::Result<
     let engine_cli = smolmachines::engine_cli()?;
     let args = mediated_start_args(name, binding);
 
-    let output = Command::new(&engine_cli)
-        .args(&args)
-        .env(INTERCEPTOR_TOKEN_ENV, &binding.token)
-        .env_remove(BOOT_BINARY_ENV)
-        .stdin(Stdio::null())
+    let output = mediated_start(&engine_cli, &args, &binding.token)
         .output()
         .map_err(|error| {
             smolmachines::Error::new(
@@ -249,8 +267,21 @@ fn start_mediated(name: &str, binding: &EgressEndpoint) -> smolmachines::Result<
     ))
 }
 
+/// Returns the engine's `machine start` command with `args`, not yet run: `token` in its
+/// environment, the boot binary's variable removed, and no stdin. `start_mediated` runs it.
+#[must_use]
+fn mediated_start(engine_cli: &Path, args: &[String], token: &str) -> Command {
+    let mut command = Command::new(engine_cli);
+    command
+        .args(args)
+        .env(INTERCEPTOR_TOKEN_ENV, token)
+        .env_remove(BOOT_BINARY_ENV)
+        .stdin(Stdio::null());
+    command
+}
+
 /// Returns the engine's `machine start` arguments for a machine whose gateway asks `binding`'s
-/// decider about every flow. The token stays out: `start_mediated` hands it over in the
+/// decider about every flow. The token stays out: `mediated_start` hands it over in the
 /// environment, since every process listing on the host shows the arguments.
 #[must_use]
 fn mediated_start_args(name: &str, binding: &EgressEndpoint) -> Vec<String> {
@@ -269,6 +300,7 @@ fn mediated_start_args(name: &str, binding: &EgressEndpoint) -> Vec<String> {
 mod tests {
     use super::*;
 
+    use std::assert_matches;
     use std::time::Instant;
 
     #[test]
@@ -369,5 +401,17 @@ mod tests {
         // A `within` that waited for the work to end would return `None` too, ten seconds
         // later, so the elapsed time is what shows the deadline.
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_engine_never_sees_docker_logins() {
+        // Left alone, the engine probes and pulls with the host's `docker login`, and a stale
+        // login makes ghcr.io refuse even a public image. The daemon's command carries this to
+        // every engine command, the SDK's `machine create` included.
+        let mut command = Command::new("path/to/mchn");
+        hide_docker_logins(&mut command);
+        let docker_config = command.get_envs().find(|(key, _)| *key == "DOCKER_CONFIG");
+
+        assert_matches!(docker_config, Some((_, Some(value))) if value == "/dev/null");
     }
 }
