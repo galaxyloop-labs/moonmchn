@@ -90,7 +90,9 @@ pub trait Machine: Sized {
 
     /// Runs `command` in the guest as the sessions' user, uid 1000, with no input and its
     /// output discarded, until it exits or `timeout` passes, and returns its exit status.
-    /// The call itself returns by then, whether the engine answered or not.
+    /// The call itself returns by then, whether the engine answered or not. The host keeps
+    /// none of the output: its memory for the call stays within a fixed bound, however much
+    /// the guest writes.
     ///
     /// # Errors
     ///

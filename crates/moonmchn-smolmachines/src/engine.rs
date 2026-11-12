@@ -2,11 +2,10 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use smolmachines::{ErrorKind, ExecOptions, Machine as SdkMachine, MachineState};
+use smolmachines::{ErrorKind, Machine as SdkMachine, MachineState};
 
 use moonmchn::config::EgressEndpoint;
 use moonmchn::image::{Digest, Image};
@@ -15,10 +14,33 @@ use moonmchn::{Error, Result};
 
 use crate::gateway::Gateway;
 use crate::machine_config;
-use crate::session::{GUEST_USER, MACHINE, NAME_FLAG};
+use crate::session::{END_OF_OPTIONS, EXEC, GUEST_USER, MACHINE, NAME_FLAG, USER_FLAG};
 
 /// The `machine` subcommand that boots a created machine.
 const START: &str = "start";
+
+/// Makes the client write each chunk of the command's output as it arrives; without it the
+/// client holds the whole output until the command ends.
+const STREAM_FLAG: &str = "--stream";
+
+/// Sets the engine-side deadline for the command; the engine ends it once the deadline passes.
+const TIMEOUT_FLAG: &str = "--timeout";
+
+/// Marks the timeout's value as whole milliseconds: the client reads a duration, such as
+/// `5000ms`.
+const MILLISECONDS_SUFFIX: &str = "ms";
+
+/// Nanoseconds in a millisecond: the timeout is rounded up to whole milliseconds, since the
+/// client refuses `0ms`.
+const NANOS_PER_MILLI: u128 = 1_000_000;
+
+/// How often the announcement checks whether the client has exited: the SDK's interval, and
+/// the most the deadline can overshoot.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The exit status reported when the client has no exit code, as when a signal killed it: the
+/// SDK's value.
+const KILLED_BY_SIGNAL: i32 = -1;
 
 /// Routes the machine's outbound TCP through the decider at the address that follows; the
 /// engine reads the token from its environment.
@@ -104,27 +126,13 @@ impl machine::Machine for Machine {
     }
 
     fn exec(&self, command: &[String], timeout: Duration) -> Result<i32> {
-        let stream = self
-            .0
-            .exec_stream(
-                command,
-                ExecOptions::new().user(GUEST_USER).timeout(timeout),
-            )
-            .map_err(|error| engine_error(&error))?;
-        // Taken before the stream moves into `within`'s thread, so the client can still be
-        // killed from here once the time runs out.
-        let kill = stream.kill_handle();
+        let engine_cli = smolmachines::engine_cli().map_err(|error| engine_error(&error))?;
 
-        let Some(result) = within(timeout, move || stream.collect_result()) else {
-            // The engine has not answered in time. Killing its client ends the command in the
-            // guest too, and the SDK reaps the client on a thread of its own.
-            kill.kill();
-            return Err(Error::Engine {
-                message: format!("no answer within {timeout:?}"),
-            });
-        };
-
-        Ok(result.exit_code)
+        exec_discarding_output(
+            &engine_cli,
+            &exec_args(self.0.name(), command, timeout),
+            timeout,
+        )
     }
 
     fn stop(self) -> Result<()> {
@@ -170,28 +178,6 @@ fn state(machine_state: MachineState) -> State {
         MachineState::Stopping => State::Stopping,
         MachineState::Unknown | _ => State::Unknown,
     }
-}
-
-/// Runs `work` on a thread of its own and waits up to `timeout` for its result.
-///
-/// Returns `None` when `timeout` passes before the result arrives. The thread is left to end
-/// on its own, since nothing can stop a thread from outside: the caller ends whatever `work`
-/// waits on, as `exec` kills the engine's client. A `work` that panics returns `None` too, at
-/// once.
-fn within<T: Send + 'static>(
-    timeout: Duration,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
-    let (sender, receiver) = mpsc::channel();
-
-    thread::spawn(move || {
-        let result = work();
-        // Once `within` has given up, the receiver is gone and the send fails, so a late
-        // result drops here.
-        drop(sender.send(result));
-    });
-
-    receiver.recv_timeout(timeout).ok()
 }
 
 /// Maps a smolmachines error to a Moon MCHN `Error::Engine`.
@@ -296,12 +282,109 @@ fn mediated_start_args(name: &str, binding: &EgressEndpoint) -> Vec<String> {
     ]
 }
 
+/// Returns the engine client's `machine exec` arguments that run `command` in machine `name`
+/// as the guest user, with an engine-side deadline of `timeout`. Each element of `command`
+/// stays one argument, after the end of the client's options.
+///
+/// shortcut: written by hand for smolvm 1.32.4's `machine exec`, so a changed flag fails
+/// silently; on every `smolmachines` bump, stop a machine with a shell open and see the
+/// broadcast.
+#[must_use]
+fn exec_args(name: &str, command: &[String], timeout: Duration) -> Vec<String> {
+    // Written here because the SDK cannot run an exec with the client's output on `/dev/null`.
+    // `ExecOptions` sets only what runs in the guest, and every SDK path that takes it holds
+    // the output or loses what the announcement needs: `exec_with` reads it all with
+    // `output()`, `exec_stream` pipes it to reader threads and a channel with no limit, and
+    // `background` returns at once with no exit status and no timeout. The SDK's own
+    // argument builder, `push_timeout_and_user`, is private, so these lines mirror it.
+    //
+    // Rounded up as the SDK rounds it, so a sub-millisecond timeout never becomes `0ms`.
+    let millis = timeout.as_nanos().div_ceil(NANOS_PER_MILLI);
+    let mut args = vec![
+        MACHINE.to_string(),
+        EXEC.to_string(),
+        STREAM_FLAG.to_string(),
+        NAME_FLAG.to_string(),
+        name.to_string(),
+        TIMEOUT_FLAG.to_string(),
+        format!("{millis}{MILLISECONDS_SUFFIX}"),
+        // What `ExecOptions::user(GUEST_USER)` passed: uid 1000, so the announcement's
+        // `kill -s HUP -1` never reaches root's processes. One argument, as the SDK writes it,
+        // so a user that starts with `-` cannot read as a flag.
+        format!("{USER_FLAG}{GUEST_USER}"),
+        END_OF_OPTIONS.to_string(),
+    ];
+
+    args.extend_from_slice(command);
+
+    args
+}
+
+/// Runs the engine client at `engine_cli` with `args` and returns its exit status, or
+/// [`KILLED_BY_SIGNAL`] when it has none.
+///
+/// Its stdin, stdout and stderr are all `/dev/null`, so none of the guest's output reaches the
+/// daemon: no pipe, no reader thread, no buffer, however much the guest writes. The engine's
+/// own error text goes there too, so the exit status alone tells why a call failed.
+///
+/// # Errors
+///
+/// Returns [`Error::Engine`] when the client cannot start, when its status cannot be read, or
+/// when it has not exited within `timeout`: it is then killed, and a failed kill is the error
+/// instead. Either way the call returns at once, and a thread of its own reaps the client.
+fn exec_discarding_output(engine_cli: &Path, args: &[String], timeout: Duration) -> Result<i32> {
+    let mut child = Command::new(engine_cli)
+        .args(args)
+        .env_remove(BOOT_BINARY_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // No retry on `ETXTBSY`, unlike the SDK's `retry_text_busy`: a binary is busy only
+        // in the milliseconds after it is unpacked, and an announcement comes after `start`
+        // has already run the same binary. Should the cache vanish under a running daemon and
+        // be fetched again here, the spawn fails and the stop goes on without its broadcast.
+        .spawn()
+        .map_err(|error| Error::Engine {
+            message: format!("run {}: {error}", engine_cli.display()),
+        })?;
+
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.code().unwrap_or(KILLED_BY_SIGNAL)),
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    // The engine has not answered in time. Killing its client ends the command in
+                    // the guest too. The client is reaped on a thread of its own: one stuck in
+                    // the kernel would hold `wait` forever, and the stop with it. The thread
+                    // starts before a failed kill returns, so even then no zombie is left.
+                    let killed = child.kill();
+                    drop(thread::Builder::new().spawn(move || child.wait()));
+                    killed.map_err(|error| Error::Engine {
+                        message: format!("kill {}: {error}", engine_cli.display()),
+                    })?;
+                    return Err(Error::Engine {
+                        message: format!("no answer within {timeout:?}"),
+                    });
+                }
+            }
+            Err(error) => {
+                return Err(Error::Engine {
+                    message: format!("wait for {}: {error}", engine_cli.display()),
+                });
+            }
+        }
+
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::assert_matches;
-    use std::time::Instant;
 
     #[test]
     fn mediated_start_arguments_are_exact() {
@@ -322,6 +405,50 @@ mod tests {
                 "--egress-interceptor",
                 "127.0.0.1:9000",
                 "--mediated-egress",
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_arguments_are_exact() {
+        // `--stream` keeps the client from holding the output; the command stays one argv
+        // element per argument, after `--`.
+        let command = ["sh", "-c", "a b"].map(String::from);
+
+        assert_eq!(
+            exec_args("alpha", &command, Duration::from_secs(5)),
+            [
+                "machine",
+                "exec",
+                "--stream",
+                "--name",
+                "alpha",
+                "--timeout",
+                "5000ms",
+                "--user=1000:1000",
+                "--",
+                "sh",
+                "-c",
+                "a b",
+            ]
+        );
+
+        // Rounded up: the client refuses `0ms`.
+        assert_eq!(
+            exec_args("alpha", &command, Duration::from_micros(500)),
+            [
+                "machine",
+                "exec",
+                "--stream",
+                "--name",
+                "alpha",
+                "--timeout",
+                "1ms",
+                "--user=1000:1000",
+                "--",
+                "sh",
+                "-c",
+                "a b",
             ]
         );
     }
@@ -381,26 +508,59 @@ mod tests {
     }
 
     #[test]
-    fn within_returns_the_result_in_time() {
-        let actual = within(Duration::from_secs(5), || 7);
+    fn exec_output_never_reaches_the_daemon() {
+        // A piped stream would let the guest's output grow the daemon's memory; `/dev/null`
+        // on all three leaves nothing to hold.
+        let args = [
+            "-c",
+            "[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
+             && [ /dev/stderr -ef /dev/null ] && exit 7; exit 3",
+        ]
+        .map(String::from);
 
-        assert_eq!(actual, Some(7));
+        let actual = exec_discarding_output(Path::new("/bin/sh"), &args, Duration::from_secs(5));
+
+        assert_matches!(actual, Ok(7));
     }
 
     #[test]
-    fn within_gives_up_once_the_timeout_passes() {
+    fn exec_kills_the_client_once_the_timeout_passes() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let marker = tempdir.path().join("marker");
+        let args = [
+            "-c".to_string(),
+            r#"sleep 1; touch "$0""#.to_string(),
+            marker.display().to_string(),
+        ];
         let started = Instant::now();
 
-        // The work outlives the timeout by far. Its thread keeps sleeping after the test ends,
-        // and the test binary exits without waiting for it.
-        let actual = within(Duration::from_millis(50), || {
-            thread::sleep(Duration::from_secs(10));
-        });
+        let actual = exec_discarding_output(Path::new("/bin/sh"), &args, Duration::from_millis(50));
 
-        assert_eq!(actual, None);
-        // A `within` that waited for the work to end would return `None` too, ten seconds
-        // later, so the elapsed time is what shows the deadline.
+        assert_matches!(actual, Err(Error::Engine { .. }));
         assert!(started.elapsed() < Duration::from_secs(1));
+        // An unkilled client would touch the marker after its sleep, though `exec` returned.
+        thread::sleep(Duration::from_secs(2));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn exec_reports_a_client_killed_by_a_signal_as_minus_one() {
+        let args = ["-c", "kill -9 $$"].map(String::from);
+
+        let actual = exec_discarding_output(Path::new("/bin/sh"), &args, Duration::from_secs(5));
+
+        assert_matches!(actual, Ok(-1));
+    }
+
+    #[test]
+    fn exec_fails_when_the_engine_cannot_start() {
+        let actual = exec_discarding_output(
+            Path::new("path/to/missing/smolvm"),
+            &[],
+            Duration::from_secs(5),
+        );
+
+        assert_matches!(actual, Err(Error::Engine { .. }));
     }
 
     #[test]

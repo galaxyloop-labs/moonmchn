@@ -222,7 +222,9 @@ names a machine SDK:
   by name; `status()` reports a `Status` (name, `State`, optional pid); `resume()`
   resumes a paused machine's saved execution; `exec(command, timeout)` runs a command
   in the guest as the sessions' user, uid 1000, with no input and its output
-  discarded, and returns its exit status, giving up once `timeout` passes; and
+  discarded, and returns its exit status, giving up once `timeout` passes; the host
+  keeps none of that output, and its memory for the call stays within a fixed bound,
+  however much the guest writes; and
   `stop(self)` destroys the machine with its disks.
 - `Gateway` decodes the request the engine's gateway writes to the decider before
   each flow: `decode_flow(bytes)` answers `Decoded::Partial(len)` while the request
@@ -767,7 +769,8 @@ with `the Moon MCHN daemon is stopping` as the reason when the daemon itself sto
 The daemon then hangs up every session, so each `mchn exec` and `mchn shell`
 ends with exit status 129 before the machine disappears, and the stop follows at
 once. The announcement is best effort: Moon MCHN gives up on it after 5 seconds,
-a failure is ignored, and it never blocks the stop.
+a failure is ignored, and it never blocks the stop. None of its output is held in
+the daemon's memory, however much the guest writes.
 
 ### Records
 
@@ -817,7 +820,8 @@ the SDK's `engine_cli()`, in the CLI's own environment: `SMOLVM` when set, else 
 compatible `smolvm` on `PATH`, else the pinned engine. Both pass the engine
 `--user=1000:1000`, and no `--workdir`, so the engine starts them in the image's
 `WORKDIR` (see [Sessions](#sessions)). The announcement's `exec` runs as the
-same user.
+same user, through the engine's client with its stdin, stdout and stderr on
+`/dev/null`, so the guest's output never reaches the daemon.
 
 Every machine boots its image pinned to its recorded digest, with networking on, on
 virtio-net, and its flows judged by the decider (see [Egress](#egress)): the engine
