@@ -18,8 +18,8 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-moonmchn = { version = "0.1.0", path = "../moonmchn" }
-moonmchn-smolmachines = { version = "0.1.0", path = "../moonmchn-smolmachines" }
+moonmchn.workspace = true
+moonmchn-smolmachines.workspace = true
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 

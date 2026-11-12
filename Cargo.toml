@@ -15,6 +15,12 @@ readme = "README.md"
 repository = "https://github.com/galaxyloop-labs/moonmchn"
 homepage = "https://github.com/galaxyloop-labs/moonmchn"
 
+# Publishing needs a version on path dependencies, and Cargo cannot read it from
+# [workspace.package]: bump with `make bump TO=X.Y.Z`, which writes every copy.
+[workspace.dependencies]
+moonmchn = { version = "0.1.0", path = "crates/moonmchn" }
+moonmchn-smolmachines = { version = "0.1.0", path = "crates/moonmchn-smolmachines" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "deny"

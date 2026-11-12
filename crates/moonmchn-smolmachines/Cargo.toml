@@ -12,7 +12,7 @@ keywords = ["microvm", "sandbox", "ai-agents", "smolmachines", "dev-tool"]
 categories = ["virtualization"]
 
 [dependencies]
-moonmchn = { version = "0.1.0", path = "../moonmchn" }
+moonmchn.workspace = true
 smolmachines = "1.32.2"
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",

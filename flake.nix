@@ -133,6 +133,7 @@
 
             pkgs.cargo-audit
             pkgs.cargo-deny
+            pkgs.cargo-edit # `make bump`: `cargo set-version` moves every crate and its requirements
             pkgs.cargo-outdated
             pkgs.cargo-expand
             pkgs.cargo-flamegraph
