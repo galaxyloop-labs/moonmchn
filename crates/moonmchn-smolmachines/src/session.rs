@@ -29,13 +29,13 @@ const LOGIN_FLAG: &str = "-l";
 pub(crate) const MACHINE: &str = "machine";
 
 /// The `machine` subcommand that runs a command in a machine.
-const EXEC: &str = "exec";
+pub(crate) const EXEC: &str = "exec";
 
 /// Names the machine a `machine` subcommand acts on.
 pub(crate) const NAME_FLAG: &str = "--name";
 
 /// Sets the user the command runs as, joined to its value in one argument.
-const USER_FLAG: &str = "--user=";
+pub(crate) const USER_FLAG: &str = "--user=";
 
 /// Gives the command a terminal.
 const TTY_FLAG: &str = "--tty";
@@ -45,7 +45,7 @@ const INTERACTIVE_FLAG: &str = "--interactive";
 
 /// Ends the client's options: every argument after it belongs to the command, even one that
 /// starts with `-`.
-const END_OF_OPTIONS: &str = "--";
+pub(crate) const END_OF_OPTIONS: &str = "--";
 
 /// Returns the engine client's command line for a session in machine `name`, for the caller
 /// to `exec`.
