@@ -7,7 +7,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
@@ -18,8 +18,8 @@ homepage = "https://github.com/galaxyloop-labs/moonmchn"
 # Publishing needs a version on path dependencies, and Cargo cannot read it from
 # [workspace.package]: bump with `make bump TO=X.Y.Z`, which writes every copy.
 [workspace.dependencies]
-moonmchn = { version = "0.1.0", path = "crates/moonmchn" }
-moonmchn-smolmachines = { version = "0.1.0", path = "crates/moonmchn-smolmachines" }
+moonmchn = { version = "0.2.0", path = "crates/moonmchn" }
+moonmchn-smolmachines = { version = "0.2.0", path = "crates/moonmchn-smolmachines" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

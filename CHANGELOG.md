@@ -1,5 +1,35 @@
 # Moon MCHN Changelog
 
+## v0.2.0 - 2026-11-12
+
+### Bug Fixes
+
+- Discard stop announcement output at the engine client [#6](https://github.com/galaxyloop-labs/moonmchn/pull/6) (@jodosha)
+- Ignore the host's Docker logins when starting a machine [#5](https://github.com/galaxyloop-labs/moonmchn/pull/5) (@jodosha)
+- Refuse plain HTTP when resolving a registry image [#3](https://github.com/galaxyloop-labs/moonmchn/pull/3) (@jodosha)
+- Run sessions as uid 1000 on any image (#2) [#2](https://github.com/galaxyloop-labs/moonmchn/pull/2) (@jodosha)
+
+### Documentation
+
+- OpenSSF Best Practices badge (@jodosha)
+- Code guidelines (@jodosha)
+
+### Tests
+
+- Fuzz the egress preamble and the claimed TLS name (@jodosha)
+
+### Build
+
+- Build release crates in a job without the publishing token (#4) [#4](https://github.com/galaxyloop-labs/moonmchn/pull/4) (@jodosha)
+- Run `cargo deny` and `cargo audit` on pull requests, `main` and weekly (@jodosha)
+- CONTRIBUTING.md (@jodosha)
+- CodeQL Rust check (@jodosha)
+
+### Chores
+
+- Release automation (@jodosha)
+- Gitignore `docs/` (@jodosha)
+
 ## v0.1.0 - 2026-11-09
 
 ### Features
@@ -21,6 +51,7 @@
 
 ### Documentation
 
+- CHANGELOG (@jodosha)
 - Move SPEC, SECURITY, ROADMAP, and a new DEVELOPMENT under `docs/` (@jodosha)
 - README splash image (@jodosha)
 - README "How it compares" section (@jodosha)
