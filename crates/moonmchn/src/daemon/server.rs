@@ -135,7 +135,7 @@ pub fn serve_in<E: Engine>(
         let listener = UnixListener::bind(&socket).map_err(|e| Error::io(&socket, e))?;
         let mut sigterm = unix::signal(SignalKind::terminate()).map_err(Error::DaemonServe)?;
 
-        let log = match mode {
+        let mut log = match mode {
             Mode::Detached => Some(instance::open_log(dir)?),
             Mode::Foreground => None,
         };
@@ -176,7 +176,7 @@ pub fn serve_in<E: Engine>(
                 // decider is gone, `next_line` yields `None`, which disables this branch for this
                 // turn of the loop.
                 Some(line) = next_line(&mut log_rx) => {
-                    drop(writeln!(out, "{line}"));
+                    drop(write_line(dir, log.as_mut(), out, &line, redirect_output));
                 }
             }
         }
@@ -184,7 +184,7 @@ pub fn serve_in<E: Engine>(
         // A line the decider sent before the shutdown was noticed comes ahead of the teardown's
         // own.
         while let Some(line) = queued_line(&mut log_rx) {
-            drop(writeln!(out, "{line}"));
+            drop(write_line(dir, log.as_mut(), out, &line, redirect_output));
         }
 
         // After a shutdown request and after `SIGTERM` alike.
@@ -425,9 +425,41 @@ async fn send<T: Serialize>(stream: &mut OwnedWriteHalf, result: Result<T>) -> i
     send_reply(stream, &reply).await
 }
 
+/// Writes one of the decider's lines: to `out` in the foreground, and in detached mode to the
+/// log, after rotating it when the line would take it past its cap.
+fn write_line(
+    dir: &Path,
+    log: Option<&mut File>,
+    out: &mut impl Write,
+    line: &str,
+    redirect: impl Fn(&File) -> io::Result<()>,
+) -> io::Result<()> {
+    let Some(log) = log else {
+        return writeln!(out, "{line}");
+    };
+
+    if !instance::fits_in_log(log.metadata()?.len(), line) {
+        // `?` converts errors with `From`, and no `From` turns the crate's `Error` into the
+        // `io::Error` this function returns: `io::Error::other` wraps it, message included.
+        *log = instance::rotate_log(dir).map_err(io::Error::other)?;
+        redirect(log)?;
+    }
+    writeln!(log, "{line}")
+}
+
+/// Points the daemon's stderr and stdout at `log`, so its own lines follow the log it rotated to.
+fn redirect_output(log: &File) -> io::Result<()> {
+    rustix::stdio::dup2_stderr(log)?;
+    rustix::stdio::dup2_stdout(log)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustix::fs::MetadataExt;
+    use std::cell::Cell;
+    use std::fs;
 
     #[tokio::test]
     async fn lines_lost_to_a_full_queue_are_counted() {
@@ -452,5 +484,38 @@ mod tests {
         // Once the decider is gone, the loop's branch ends.
         drop(log);
         assert_eq!(next_line(&mut waited).await, None);
+    }
+
+    #[test]
+    fn a_line_that_would_cross_the_cap_goes_to_a_fresh_log() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path();
+        let mut log = instance::open_log(dir).unwrap();
+        // `abc` and its newline take 4 bytes, one more than the log has room for.
+        log.set_len(8 * 1024 * 1024 - 3).unwrap();
+        let redirected = Cell::new(None);
+
+        write_line(
+            dir,
+            Some(&mut log),
+            &mut io::sink(),
+            "abc",
+            |file: &File| {
+                redirected.set(Some(file.metadata()?.ino()));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        // The full log moved aside whole, and the line went to a fresh `daemon.log`, which the
+        // caller's handle and the daemon's output now point at.
+        let fresh = fs::metadata(dir.join("daemon.log")).unwrap().ino();
+        assert_eq!(
+            fs::metadata(dir.join("daemon.log.1")).unwrap().len(),
+            8 * 1024 * 1024 - 3
+        );
+        assert_eq!(fs::read_to_string(dir.join("daemon.log")).unwrap(), "abc\n");
+        assert_eq!(log.metadata().unwrap().ino(), fresh);
+        assert_eq!(redirected.get(), Some(fresh));
     }
 }
