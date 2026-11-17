@@ -444,7 +444,9 @@ fn write_line(
         *log = instance::rotate_log(dir).map_err(io::Error::other)?;
         redirect(log)?;
     }
-    writeln!(log, "{line}")
+    // One write per line: `writeln!` writes the line and then its newline, and a write from
+    // another thread, such as a panic message on stderr, could land between the two.
+    log.write_all(format!("{line}\n").as_bytes())
 }
 
 /// Points the daemon's stderr and stdout at `log`, so its own lines follow the log it rotated to.
