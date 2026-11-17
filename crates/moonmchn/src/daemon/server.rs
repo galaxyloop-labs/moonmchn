@@ -55,6 +55,9 @@ pub(super) const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// than the log takes their lines cannot grow the daemon's memory.
 const LOG_LINES_MAX: usize = 1024;
 
+/// The separator between an error's message and each of its causes.
+const CAUSE_SEPARATOR: &str = ": ";
+
 /// The mode in which the daemon server is running.
 #[derive(Debug, Clone, Copy)]
 pub enum Mode {
@@ -76,8 +79,9 @@ pub enum Mode {
 /// happen until the daemon notices a shutdown, and the ones queued by then are written ahead of
 /// the teardown's own; a line sent during the teardown is dropped, so `stopped` stays the last
 /// line. At most `LOG_LINES_MAX` of them wait: past that, the oldest go, and one line counts
-/// them. Requests are admitted ahead of the decider's lines, so a guest whose denied flows keep
-/// coming cannot hold off one.
+/// them. A line that cannot be written, as when the detached daemon's log fails to rotate, is
+/// dropped, and `out` gets one line for the first of a run. Requests are admitted ahead of the
+/// decider's lines, so a guest whose denied flows keep coming cannot hold off one.
 ///
 /// The daemon serves until a shutdown request or `SIGTERM`, then tears down: it closes
 /// admission, waits up to `teardown_timeout` for every accepted request to finish, boots in
@@ -144,6 +148,8 @@ pub fn serve_in<E: Engine>(
         let (log_tx, mut log_rx) = broadcast::channel::<String>(LOG_LINES_MAX);
         let decider = tokio::spawn(decider::serve::<E::Gateway>(Arc::clone(&egress), log_tx));
         announce_ready(out, &socket, log.as_ref())?;
+        // Whether the decider's last line was dropped, so a run of them is reported once.
+        let mut dropping = false;
 
         // Every request handler, so the teardown can wait for them all.
         let mut handlers = JoinSet::new();
@@ -176,7 +182,8 @@ pub fn serve_in<E: Engine>(
                 // decider is gone, `next_line` yields `None`, which disables this branch for this
                 // turn of the loop.
                 Some(line) = next_line(&mut log_rx) => {
-                    drop(write_line(dir, log.as_mut(), out, &line, redirect_output));
+                    let written = write_line(dir, log.as_mut(), out, &line, redirect_output);
+                    report_dropped(written, &mut dropping, out);
                 }
             }
         }
@@ -184,7 +191,8 @@ pub fn serve_in<E: Engine>(
         // A line the decider sent before the shutdown was noticed comes ahead of the teardown's
         // own.
         while let Some(line) = queued_line(&mut log_rx) {
-            drop(write_line(dir, log.as_mut(), out, &line, redirect_output));
+            let written = write_line(dir, log.as_mut(), out, &line, redirect_output);
+            report_dropped(written, &mut dropping, out);
         }
 
         // After a shutdown request and after `SIGTERM` alike.
@@ -449,6 +457,34 @@ fn write_line(
     log.write_all(format!("{line}\n").as_bytes())
 }
 
+/// Reports on `out` a line of the decider's that `write_line` could not write, as when the log
+/// fails to rotate: such a line is dropped. Only the first of a run is reported, with its error,
+/// and the next line written ends the run, so a failure that lasts adds one line to a log that
+/// may be at its cap already. In detached mode `out` is the daemon's stdout, which points at the
+/// log the daemon still holds.
+fn report_dropped(written: io::Result<()>, dropping: &mut bool, out: &mut impl Write) {
+    match written {
+        Ok(()) => *dropping = false,
+        Err(_) if *dropping => {}
+        Err(error) => {
+            *dropping = true;
+            let error = with_causes(&error);
+            drop(writeln!(out, "egress: lines dropped: {error}"));
+        }
+    }
+}
+
+/// Writes `error` with its causes, which its own message leaves out: the crate's errors name
+/// what failed, and the operating system's error is their cause.
+fn with_causes(error: &io::Error) -> String {
+    std::iter::successors(Some(error as &dyn std::error::Error), |error| {
+        error.source()
+    })
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join(CAUSE_SEPARATOR)
+}
+
 /// Points the daemon's stderr and stdout at `log`, so its own lines follow the log it rotated to.
 fn redirect_output(log: &File) -> io::Result<()> {
     rustix::stdio::dup2_stderr(log)?;
@@ -519,5 +555,28 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("daemon.log")).unwrap(), "abc\n");
         assert_eq!(log.metadata().unwrap().ino(), fresh);
         assert_eq!(redirected.get(), Some(fresh));
+    }
+
+    #[test]
+    fn a_run_of_dropped_lines_is_reported_once() {
+        // What `write_line` returns when a rotation fails: the crate's error inside an
+        // `io::Error`, with the operating system's error as its cause.
+        let failed = || {
+            let cause = io::Error::other("too many open files");
+            let path = Path::new("/state/daemon.log.new");
+            Err(io::Error::other(Error::io(path, cause)))
+        };
+        let mut out = Vec::new();
+        let mut dropping = false;
+
+        report_dropped(failed(), &mut dropping, &mut out);
+        report_dropped(failed(), &mut dropping, &mut out);
+        // A line that gets through ends the run, so the next line dropped is reported again.
+        report_dropped(Ok(()), &mut dropping, &mut out);
+        report_dropped(failed(), &mut dropping, &mut out);
+
+        let line = "egress: lines dropped: \
+                    failed to access /state/daemon.log.new: too many open files\n";
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{line}{line}"));
     }
 }

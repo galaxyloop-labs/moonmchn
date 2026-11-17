@@ -373,6 +373,7 @@ Moon MCHN never changes existing permissions.
 | `daemon.pid` | `0600` | locked for as long as the daemon runs, and for as long as an operation it abandoned at the teardown still runs; holds its pid for humans |
 | `daemon.log` | `0600` | appended to; receives the daemon's output after startup; rotates at 8 MiB, as below |
 | `daemon.log.1` to `daemon.log.15` | `0600` | the previous logs, `daemon.log.1` the most recent |
+| `daemon.log.new` | `0600` | the fresh log while a rotation runs; it becomes `daemon.log` when the rotation ends, and a rotation that failed leaves it, empty, for the next attempt |
 | `machines/` | `0700` | one record per machine; see [Records](#records) |
 | `egress/` | `0700` | holds `port` |
 | `egress/port` | `0600` | the port on `127.0.0.1` where the daemon listens for egress decisions; see below |
@@ -390,14 +391,22 @@ the way `logrotate` numbers them: each previous log moves one number up, replaci
 lines therefore fill at most 16 files of 8 MiB, 128 MiB in all. The daemon's
 stdout and stderr point at `daemon.log` too: its own lines, such as `stopped`, and
 a panic message count toward a file's 8 MiB, but only a line from the decider
-starts a rotation. A log that cannot move stops the rotation, so no log moves over
-it, and the decider's line is dropped.
+starts a rotation.
 
-A previous log can be deleted at any time: a number missing from the sequence is
-skipped. To empty `daemon.log` while the daemon runs, truncate it in place, as
-`: > daemon.log` does. The daemon holds it open for appending, so a deleted
-`daemon.log` keeps taking the daemon's lines, unseen, until the next rotation opens
-a fresh one.
+A rotation opens the fresh log first, as `daemon.log.new`, and renames it
+`daemon.log` last. When it fails, because the fresh log cannot open or a log cannot
+move, it stops there: no log moves over the one that stayed, the decider's line is
+dropped, and the next line tries again. That attempt carries on from where the
+last one stopped, so a rotation replaces `daemon.log.15` once, however many
+attempts it takes. The daemon reports the first line it drops, as
+`egress: lines dropped: <error>`, in the log it still writes to.
+
+Every rotation leaves the previous logs numbered in sequence, from `daemon.log.1`
+up. A previous log can be deleted at any time: the next rotation closes the gap,
+and replaces no log. To empty `daemon.log` while the daemon runs, truncate it in
+place, as `: > daemon.log` does. The daemon holds it open for appending, so a
+deleted `daemon.log` keeps taking the daemon's lines, unseen, until the next
+rotation opens a fresh one.
 
 To follow the log, use `tail -F daemon.log`: it reopens `daemon.log` when a
 rotation replaces it, while `tail -f` stays on the file that became `daemon.log.1`.
@@ -596,6 +605,7 @@ within the limits below:
 | `egress: accept failed: <error>`, `egress: listener failed: <error>` | the listener's own errors |
 | `egress: a: 12 lines dropped: more than 60 in 60 s` | the lines machine `a` dropped past its budget, written ahead of its next line in a new window |
 | `egress: 37 lines dropped: the log fell behind` | lines that came faster than the daemon wrote them: past 1024 waiting, each new one overwrites the oldest |
+| `egress: lines dropped: <error>` | a line the daemon could not write, as when the log fails to rotate: written for the first one, then again only once a line got through |
 
 - A deny's reason is one of `loopback`, `guest link`, `host address`, `built-in deny`,
   `listed in deny`, `no name to check against deny` and `no list allows it`.

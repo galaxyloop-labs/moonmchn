@@ -17,6 +17,10 @@ const SOCKET_FILE_NAME: &str = "daemon.sock";
 /// The name of the current log. Each previous log adds its number to it, as in `daemon.log.1`.
 const LOG_FILE_NAME: &str = "daemon.log";
 
+/// The name a fresh log opens under while a rotation makes room for it. The rotation's last step
+/// renames it `daemon.log`.
+const FRESH_LOG_FILE_NAME: &str = "daemon.log.new";
+
 /// The mode of the lock and log files.
 const FILE_MODE: u32 = 0o600;
 
@@ -26,6 +30,10 @@ const LOG_ROTATE_BYTES: ByteSize = ByteSize::checked_from_mib(8).expect("8 MiB f
 /// The number of previous logs kept, `daemon.log.1` through `daemon.log.15`. With `daemon.log`,
 /// the 16 logs take at most 128 MiB.
 const PREVIOUS_LOGS_MAX: u32 = 15;
+
+/// The number `daemon.log` counts as when a rotation numbers the logs from the youngest. The
+/// previous logs follow from 1.
+const CURRENT_LOG: u32 = 0;
 
 /// The separator between a previous log's name and its number, as in `daemon.log.1`.
 const LOG_NUMBER_SEPARATOR: char = '.';
@@ -97,45 +105,119 @@ pub(super) fn claim(dir: &Path) -> Result<File> {
 }
 
 pub(super) fn open_log(dir: &Path) -> Result<File> {
-    let path = dir.join(LOG_FILE_NAME);
+    open_log_at(&dir.join(LOG_FILE_NAME))
+}
 
+/// Opens the log at `path` for appending, and creates it, private to the user, when it is
+/// missing.
+fn open_log_at(path: &Path) -> Result<File> {
     OpenOptions::new()
         .append(true)
         .create(true)
         .mode(FILE_MODE)
-        .open(&path)
-        .map_err(|e| Error::io(&path, e))
+        .open(path)
+        .map_err(|e| Error::io(path, e))
 }
 
-/// Moves every log in `dir` one step back, as `logrotate` numbers them, and opens a fresh
-/// `daemon.log` as `open_log` does: `daemon.log.14` moves over the oldest, `daemon.log.15`,
-/// then each younger one over the next, down to `daemon.log`, which becomes `daemon.log.1`.
-/// The oldest moves first, so no log is overwritten before it moved. A log missing from the
-/// sequence, deleted while the daemon ran, is skipped, and a fresh `daemon.log` opens all the
-/// same, so the log keeps going.
+/// Rotates the logs in `dir`, as `logrotate` numbers them, and returns a fresh `daemon.log`,
+/// opened as `open_log` opens it.
+///
+/// The fresh log opens first, as `daemon.log.new`, so a rotation that can't open it moves no
+/// log. Then `daemon.log.14` moves over the oldest, `daemon.log.15`, and each younger one over
+/// the next, down to `daemon.log`, which becomes `daemon.log.1`. The oldest moves first, so no
+/// log is overwritten before it moved. The fresh log takes the name `daemon.log` last.
+///
+/// The previous logs come out numbered in sequence. A number missing among them, whose log was
+/// deleted while the daemon ran, is filled: the logs younger than it move one step back, the
+/// older ones close any other gap between them, and none is replaced. With `daemon.log` itself
+/// missing, there is nothing to make room for, so no log moves one step back.
+///
+/// A rotation that fails stops where it is. One that stopped between two moves left a number
+/// free, and one that stopped before the fresh log took its name left `daemon.log` missing:
+/// either way the next rotation carries on from there. However many attempts a rotation takes,
+/// the oldest log is the only one replaced, and once.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Io`] if a log can't be moved, or `daemon.log` can't be opened. The rotation
-/// stops at the first log that can't move, so no younger log moves over it.
+/// Returns [`Error::Io`] if the fresh log can't be opened or renamed, or a log can't be moved.
+/// The rotation stops at the first log that can't move, so no younger log moves over it.
 pub(super) fn rotate_log(dir: &Path) -> Result<File> {
-    for n in (1..PREVIOUS_LOGS_MAX).rev() {
-        let next = n.saturating_add(1);
-        move_log(&numbered_log_path(dir, n), &numbered_log_path(dir, next))?;
-    }
-    move_log(&dir.join(LOG_FILE_NAME), &numbered_log_path(dir, 1))?;
-
-    open_log(dir)
+    rotate_log_with(dir, |from, to| std::fs::rename(from, to))
 }
 
-/// The path in `dir` of the log numbered `n`, as in `daemon.log.1`.
+/// Rotates the logs in `dir` as `rotate_log` describes, moving each file with `rename`.
+/// `rotate_log` passes the file system's rename, and a test passes one that fails.
+fn rotate_log_with(dir: &Path, rename: impl Fn(&Path, &Path) -> io::Result<()>) -> Result<File> {
+    let fresh_path = dir.join(FRESH_LOG_FILE_NAME);
+    let fresh = open_log_at(&fresh_path)?;
+
+    let free = first_free_number(dir)?;
+    close_gaps_past(dir, free, &rename)?;
+    for n in (CURRENT_LOG..free).rev() {
+        let next = n.saturating_add(1);
+        move_log(
+            &numbered_log_path(dir, n),
+            &numbered_log_path(dir, next),
+            &rename,
+        )?;
+    }
+
+    rename(&fresh_path, &dir.join(LOG_FILE_NAME)).map_err(|err| Error::io(&fresh_path, err))?;
+    Ok(fresh)
+}
+
+/// The number in `dir` that the logs step back into, with `daemon.log` counting as 0: the
+/// lowest one that no log holds. When every number below the oldest log's is taken, it is the
+/// oldest log's, and that log is the one the rotation replaces.
+fn first_free_number(dir: &Path) -> Result<u32> {
+    for n in CURRENT_LOG..PREVIOUS_LOGS_MAX {
+        if !log_exists(&numbered_log_path(dir, n))? {
+            return Ok(n);
+        }
+    }
+    Ok(PREVIOUS_LOGS_MAX)
+}
+
+/// Renumbers the logs in `dir` older than the number `free`, so that they follow it in
+/// sequence. From the youngest, each takes the next number after `free`, which no log holds by
+/// then, so none is overwritten. `rename` moves each one.
+fn close_gaps_past(
+    dir: &Path,
+    free: u32,
+    rename: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<()> {
+    let first = free.saturating_add(1);
+    let mut next = first;
+    for n in first..=PREVIOUS_LOGS_MAX {
+        let path = numbered_log_path(dir, n);
+        if !log_exists(&path)? {
+            continue;
+        }
+        if n != next {
+            move_log(&path, &numbered_log_path(dir, next), &rename)?;
+        }
+        next = next.saturating_add(1);
+    }
+    Ok(())
+}
+
+/// The path in `dir` of the log numbered `n`: `daemon.log` for the current log, and for a
+/// previous one the same name with its number, as in `daemon.log.1`.
 fn numbered_log_path(dir: &Path, n: u32) -> PathBuf {
+    if n == CURRENT_LOG {
+        return dir.join(LOG_FILE_NAME);
+    }
     dir.join(format!("{LOG_FILE_NAME}{LOG_NUMBER_SEPARATOR}{n}"))
 }
 
-/// Renames the log `from` to `to`, skipping a `from` deleted while the daemon ran.
-fn move_log(from: &Path, to: &Path) -> Result<()> {
-    match std::fs::rename(from, to) {
+/// Returns whether a log is at `path`.
+fn log_exists(path: &Path) -> Result<bool> {
+    std::fs::exists(path).map_err(|err| Error::io(path, err))
+}
+
+/// Renames the log `from` to `to` with `rename`, skipping a `from` deleted while the daemon ran.
+fn move_log(from: &Path, to: &Path, rename: impl Fn(&Path, &Path) -> io::Result<()>) -> Result<()> {
+    match rename(from, to) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(Error::io(from, err)),
@@ -322,31 +404,70 @@ mod tests {
     }
 
     #[test]
-    fn rotation_moves_the_logs_on_both_sides_of_a_gap() {
-        // `daemon.log.1` was deleted, and the logs around it still move one step back.
+    fn rotation_leaves_the_previous_logs_numbered_in_sequence() {
+        // Two gaps in the numbering, after `daemon.log.1` and after `daemon.log.3`. A log
+        // deleted while the daemon ran leaves one, and so does a rotation that failed before it
+        // moved the next log there.
         let log_dir = tempfile::tempdir().unwrap();
         let dir = log_dir.path();
         fs::write(dir.join("daemon.log"), "current\n").unwrap();
-        fs::write(dir.join("daemon.log.2"), "older\n").unwrap();
+        fs::write(dir.join("daemon.log.1"), "1\n").unwrap();
+        fs::write(dir.join("daemon.log.3"), "3\n").unwrap();
+        fs::write(dir.join("daemon.log.15"), "15\n").unwrap();
 
         super::rotate_log(dir).unwrap();
 
+        // The two most recent logs moved one step back, into the first gap. `daemon.log.3`
+        // stayed, and the oldest moved down next to it: no log was replaced.
         assert_eq!(read(dir, "daemon.log.1").as_deref(), Some("current\n"));
-        assert_eq!(read(dir, "daemon.log.2"), None);
-        assert_eq!(read(dir, "daemon.log.3").as_deref(), Some("older\n"));
+        assert_eq!(read(dir, "daemon.log.2").as_deref(), Some("1\n"));
+        assert_eq!(read(dir, "daemon.log.3").as_deref(), Some("3\n"));
+        assert_eq!(read(dir, "daemon.log.4").as_deref(), Some("15\n"));
+        assert_eq!(read(dir, "daemon.log.15"), None);
     }
 
     #[test]
-    fn rotating_a_deleted_log_opens_a_fresh_one() {
-        // Someone deleted `daemon.log` while the daemon ran, so there is nothing to move aside.
+    fn rotating_a_deleted_log_leaves_the_previous_logs_in_place() {
+        // `daemon.log` is gone: someone deleted it while the daemon ran, or a rotation moved it
+        // aside and then failed. There is nothing to move aside, so no previous log moves.
         let log_dir = tempfile::tempdir().unwrap();
         let dir = log_dir.path();
+        fs::write(dir.join("daemon.log.1"), "1\n").unwrap();
 
         let mut file = super::rotate_log(dir).unwrap();
         file.write_all(b"fresh\n").unwrap();
 
         assert_eq!(read(dir, "daemon.log").as_deref(), Some("fresh\n"));
-        assert_eq!(read(dir, "daemon.log.1"), None);
+        assert_eq!(read(dir, "daemon.log.1").as_deref(), Some("1\n"));
+        assert_eq!(read(dir, "daemon.log.2"), None);
+    }
+
+    #[test]
+    fn a_rotation_that_cannot_open_the_fresh_log_moves_no_log() {
+        // A directory holds the name the fresh log opens under, so it can't open, as when the
+        // daemon has no file descriptor left.
+        let log_dir = tempfile::tempdir().unwrap();
+        let dir = log_dir.path();
+        fs::create_dir(dir.join("daemon.log.new")).unwrap();
+        fs::write(dir.join("daemon.log"), "0\n").unwrap();
+        for n in 1..=15 {
+            fs::write(dir.join(format!("daemon.log.{n}")), format!("{n}\n")).unwrap();
+        }
+
+        // Each line the decider sends tries the rotation again. Were a failed attempt to move
+        // the logs, 16 of them would push every one of the 16 logs out.
+        for _ in 0..16 {
+            assert!(super::rotate_log(dir).is_err());
+        }
+
+        assert_eq!(read(dir, "daemon.log").as_deref(), Some("0\n"));
+        for n in 1..=15 {
+            assert_eq!(
+                read(dir, &format!("daemon.log.{n}")),
+                Some(format!("{n}\n")),
+                "daemon.log.{n}"
+            );
+        }
     }
 
     #[test]
@@ -359,16 +480,63 @@ mod tests {
 
     #[test]
     fn a_failed_move_stops_the_rotation() {
-        // `daemon.log.15` is a directory with a file in it: `daemon.log.14` can't move over it.
+        // Every number is taken, and `daemon.log.15` is a directory with a file in it:
+        // `daemon.log.14` can't move over it.
         let log_dir = tempfile::tempdir().unwrap();
         let dir = log_dir.path();
         fs::create_dir_all(dir.join("daemon.log.15/x")).unwrap();
-        fs::write(dir.join("daemon.log.14"), "14\n").unwrap();
-        fs::write(dir.join("daemon.log.13"), "13\n").unwrap();
+        fs::write(dir.join("daemon.log"), "0\n").unwrap();
+        for n in 1..=14 {
+            fs::write(dir.join(format!("daemon.log.{n}")), format!("{n}\n")).unwrap();
+        }
 
         assert!(super::rotate_log(dir).is_err());
         // `daemon.log.13` didn't move over the log that stayed.
         assert_eq!(read(dir, "daemon.log.14").as_deref(), Some("14\n"));
+    }
+
+    #[test]
+    fn a_rotation_carries_on_from_where_a_failed_one_stopped() {
+        // Every number is taken, and `daemon.log.7` can't move, however often the rotation is
+        // tried.
+        let log_dir = tempfile::tempdir().unwrap();
+        let dir = log_dir.path();
+        fs::write(dir.join("daemon.log"), "0\n").unwrap();
+        for n in 1..=15 {
+            fs::write(dir.join(format!("daemon.log.{n}")), format!("{n}\n")).unwrap();
+        }
+        let stuck = dir.join("daemon.log.7");
+        let rename = |from: &Path, to: &Path| {
+            if from == stuck {
+                return Err(io::Error::other("stuck"));
+            }
+            fs::rename(from, to)
+        };
+
+        // Each line the decider sends tries the rotation again. Were every attempt to move the
+        // logs, 16 of them would push every log older than the stuck one out.
+        for _ in 0..16 {
+            assert!(super::rotate_log_with(dir, rename).is_err());
+        }
+
+        // The first attempt moved the logs older than the stuck one, `daemon.log.14` over the
+        // oldest, and left the stuck one's next number free. No attempt after it moved them again.
+        assert_eq!(read(dir, "daemon.log.15").as_deref(), Some("14\n"));
+        assert_eq!(read(dir, "daemon.log.8"), None);
+
+        // Once the log can move, the rotation ends as a single one would have: each log one step
+        // back, and the oldest alone replaced.
+        let mut file = super::rotate_log(dir).unwrap();
+        file.write_all(b"fresh\n").unwrap();
+
+        for n in 1..=15 {
+            assert_eq!(
+                read(dir, &format!("daemon.log.{n}")),
+                Some(format!("{}\n", n - 1)),
+                "daemon.log.{n}"
+            );
+        }
+        assert_eq!(read(dir, "daemon.log").as_deref(), Some("fresh\n"));
     }
 
     /// The contents of the file `name` in `dir`, or `None` when there is no such file, so a
