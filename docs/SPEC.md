@@ -387,16 +387,20 @@ writes a line that would take `daemon.log` past 8 MiB, the daemon rotates the lo
 the way `logrotate` numbers them: each previous log moves one number up, replacing
 `daemon.log.15` at the top, `daemon.log` becomes `daemon.log.1`, and a fresh
 `daemon.log` takes that line and the daemon's output from then on. The decider's
-lines therefore fill at most 16 files of 8 MiB, 128 MiB in all. The daemon's own
-lines, such as `stopped`, count toward a file's 8 MiB, but only a line from the
-decider starts a rotation. A log that cannot move stops the rotation, so no log
-moves over it, and the decider's line is dropped.
+lines therefore fill at most 16 files of 8 MiB, 128 MiB in all. The daemon's
+stdout and stderr point at `daemon.log` too: its own lines, such as `stopped`, and
+a panic message count toward a file's 8 MiB, but only a line from the decider
+starts a rotation. A log that cannot move stops the rotation, so no log moves over
+it, and the decider's line is dropped.
 
 A previous log can be deleted at any time: a number missing from the sequence is
 skipped. To empty `daemon.log` while the daemon runs, truncate it in place, as
 `: > daemon.log` does. The daemon holds it open for appending, so a deleted
 `daemon.log` keeps taking the daemon's lines, unseen, until the next rotation opens
 a fresh one.
+
+To follow the log, use `tail -F daemon.log`: it reopens `daemon.log` when a
+rotation replaces it, while `tail -f` stays on the file that became `daemon.log.1`.
 
 A machine can outlive the daemon that started it: a daemon killed outright or
 crashed leaves its machines running, and so does one whose stop of a machine fails
