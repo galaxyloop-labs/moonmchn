@@ -401,6 +401,14 @@ last one stopped, so a rotation replaces `daemon.log.15` once, however many
 attempts it takes. The daemon reports the first line it drops, as
 `egress: lines dropped: <error>`, in the log it still writes to.
 
+A rotation ends by pointing the daemon's stdout and stderr at the fresh log. When
+that fails, the decider's line is written to the fresh log all the same, and the
+daemon reports the failure there once, as
+`egress: the daemon's own lines still go to the previous log: <error>`. It tries
+again ahead of each of the decider's next lines, and no retry moves a log. Until
+it succeeds, the daemon's own lines land in `daemon.log.1`, with a panic message
+when stderr stayed behind, and a daemon that stops first leaves `stopped` there.
+
 Every rotation leaves the previous logs numbered in sequence, from `daemon.log.1`
 up. A previous log can be deleted at any time: the next rotation closes the gap,
 and replaces no log. To empty `daemon.log` while the daemon runs, truncate it in
@@ -606,6 +614,7 @@ within the limits below:
 | `egress: a: 12 lines dropped: more than 60 in 60 s` | the lines machine `a` dropped past its budget, written ahead of its next line in a new window |
 | `egress: 37 lines dropped: the log fell behind` | lines that came faster than the daemon wrote them: past 1024 waiting, each new one overwrites the oldest |
 | `egress: lines dropped: <error>` | a line the daemon could not write, as when the log fails to rotate: written for the first one, then again only once a line got through |
+| `egress: the daemon's own lines still go to the previous log: <error>` | a rotation that could not point the daemon's stdout and stderr at the fresh log: written at the top of that log for the first failure, then again only once they followed and a later rotation failed the same way |
 
 - A deny's reason is one of `loopback`, `guest link`, `host address`, `built-in deny`,
   `listed in deny`, `no name to check against deny` and `no list allows it`.

@@ -174,29 +174,34 @@ fn fits_in_log(len: u64, line: &str) -> bool {
 /// the log, which it rotates at its cap.
 ///
 /// It keeps what lasts from one line to the next: the log's handle, which each rotation
-/// replaces, and whether the last line was dropped. `out` is lent for each line, because the
-/// daemon writes its own lines to it in between.
+/// replaces, whether the last redirect failed, and whether the last line was dropped. `out` is
+/// lent for each line, because the daemon writes its own lines to it in between.
 pub(super) struct Writer<R> {
     /// The daemon's state directory, where the log rotates.
     dir: PathBuf,
     /// The log in detached mode, replaced by each rotation, and `None` in the foreground.
     log: Option<File>,
     /// Points the daemon's output at the log a rotation opened. `serve_in` passes
-    /// `redirect_output`, and a test passes one that records the log it got.
+    /// `redirect_output`, and a test passes one that records the log it got, or one that fails.
     redirect: R,
+    /// Whether the last `redirect` failed, so the next line tries it again, and a run of
+    /// failures is reported once.
+    redirect_pending: bool,
     /// Whether the last line was dropped, so a run of them is reported once.
     dropping: bool,
 }
 
 impl<R: Fn(&File) -> io::Result<()>> Writer<R> {
-    /// A writer for the daemon whose state directory is `dir`, with no line dropped yet. `log`
-    /// is the daemon's log in detached mode, and `None` in the foreground. `redirect` points
-    /// the daemon's output at the log a rotation opens.
+    /// A writer for the daemon whose state directory is `dir`, with no line dropped yet and no
+    /// redirect pending: `announce_ready` has pointed the daemon's output at `log` already.
+    /// `log` is the daemon's log in detached mode, and `None` in the foreground. `redirect`
+    /// points the daemon's output at the log a rotation opens.
     pub(super) fn new(dir: &Path, log: Option<File>, redirect: R) -> Self {
         Self {
             dir: dir.to_path_buf(),
             log,
             redirect,
+            redirect_pending: false,
             dropping: false,
         }
     }
@@ -208,19 +213,55 @@ impl<R: Fn(&File) -> io::Result<()>> Writer<R> {
         self.report_dropped(written, out);
     }
 
-    /// Writes `line`: to `out` in the foreground, and in detached mode to the log, after rotating
-    /// it when the line would take it past its cap.
+    /// Writes `line`: to `out` in the foreground, and in detached mode to the log, in three
+    /// steps.
+    ///
+    /// 1. A line that would take the log past its cap rotates it first, and the fresh log takes
+    ///    the handle's place.
+    /// 2. After a rotation, `redirect` points the daemon's output at the fresh log. When it
+    ///    fails, the failure is reported in that log, once for a run of them, and `redirect`
+    ///    runs again ahead of each next line, with no rotation, until it succeeds.
+    /// 3. The line is written, whether or not the redirect succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the log's length check, of the rotation, or of the write. The line
+    /// is then dropped, and `report_dropped` reports it. A failed redirect is no error here.
     fn try_write_line(&mut self, out: &mut impl Write, line: &str) -> io::Result<()> {
         let Some(log) = self.log.as_mut() else {
             return writeln!(out, "{line}");
         };
 
-        if !fits_in_log(log.metadata()?.len(), line) {
+        let rotated = !fits_in_log(log.metadata()?.len(), line);
+        if rotated {
             // `?` converts errors with `From`, and no `From` turns the crate's `Error` into the
             // `io::Error` this function returns: `io::Error::other` wraps it, message included.
             *log = rotate_log(&self.dir).map_err(io::Error::other)?;
-            (self.redirect)(log)?;
         }
+
+        // A redirect is owed after a rotation, and again while the last one failed. The retry
+        // runs on the log the writer already holds, so it moves no log.
+        if rotated || self.redirect_pending {
+            match (self.redirect)(log) {
+                Ok(()) => self.redirect_pending = false,
+                Err(error) => {
+                    // Only the first failure of a run is reported. The report goes through the
+                    // log's handle, because `out` is the daemon's stdout, which still points at
+                    // the previous log.
+                    if !self.redirect_pending {
+                        let report = format!(
+                            "egress: the daemon's own lines still go to the previous log: {error}\n"
+                        );
+                        drop(log.write_all(report.as_bytes()));
+                    }
+                    self.redirect_pending = true;
+                }
+            }
+        }
+
+        // The line is written whether or not the redirect succeeded: the cap is checked on the
+        // fresh log, so it holds either way.
+        //
         // One write per line: `writeln!` writes the line and then its newline, and a write from
         // another thread, such as a panic message on stderr, could land between the two.
         log.write_all(format!("{line}\n").as_bytes())
@@ -230,7 +271,8 @@ impl<R: Fn(&File) -> io::Result<()>> Writer<R> {
     /// rotate: such a line is dropped. Only the first of a run is reported, with its error, and
     /// the next line written ends the run, so a failure that lasts adds one line to a log that
     /// may be at its cap already. In detached mode `out` is the daemon's stdout, which points at
-    /// the log the daemon still holds.
+    /// the log the daemon still holds. While a redirect is pending it points at the previous
+    /// log, so the report lands there.
     fn report_dropped(&mut self, written: io::Result<()>, out: &mut impl Write) {
         match written {
             Ok(()) => self.dropping = false,
@@ -476,6 +518,55 @@ mod tests {
         let log = writer.log.as_ref().unwrap();
         assert_eq!(log.metadata().unwrap().ino(), fresh);
         assert_eq!(redirected.get(), Some(fresh));
+    }
+
+    #[test]
+    fn a_failed_redirect_is_retried_ahead_of_the_next_line() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path();
+        let log = open(dir).unwrap();
+        // `abc` and its newline take 4 bytes, one more than the log has room for.
+        log.set_len(8 * 1024 * 1024 - 3).unwrap();
+        // A redirect that counts its calls, fails the first two, then succeeds.
+        let calls = Cell::new(0);
+        let mut writer = Writer::new(dir, Some(log), |_: &File| {
+            calls.set(calls.get() + 1);
+            if calls.get() <= 2 {
+                return Err(io::Error::other("stuck"));
+            }
+            Ok(())
+        });
+
+        // `abc` rotates the log, and each of the other lines fits in the fresh one.
+        for line in ["abc", "def", "ghi", "jkl"] {
+            let written = writer.try_write_line(&mut io::sink(), line);
+            assert!(written.is_ok(), "{line}: {written:?}");
+        }
+
+        // Once after the rotation, then ahead of `def` and of `ghi`. The third call succeeds,
+        // so `jkl` needs none.
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn a_run_of_failed_redirects_is_reported_once() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = state.path();
+        let log = open(dir).unwrap();
+        // `abc` and its newline take 4 bytes, one more than the log has room for.
+        log.set_len(8 * 1024 * 1024 - 3).unwrap();
+        // A redirect that never succeeds.
+        let mut writer = Writer::new(dir, Some(log), |_: &File| Err(io::Error::other("stuck")));
+
+        writer.write_line(&mut io::sink(), "abc");
+        writer.write_line(&mut io::sink(), "def");
+
+        // The fresh log holds the report of the first failure, then both lines. The second
+        // failure adds no report, and the retry moves no log.
+        assert_eq!(
+            read(dir, "daemon.log").as_deref(),
+            Some("egress: the daemon's own lines still go to the previous log: stuck\nabc\ndef\n")
+        );
     }
 
     #[test]

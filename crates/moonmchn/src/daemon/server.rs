@@ -427,6 +427,9 @@ async fn send<T: Serialize>(stream: &mut OwnedWriteHalf, result: Result<T>) -> i
 }
 
 /// Points the daemon's stderr and stdout at `log`, so its own lines follow the log it rotated to.
+///
+/// The log's writer calls it again after a failure, even one that left stderr moved and stdout
+/// behind: each `dup2` sets its descriptor whatever it pointed at.
 fn redirect_output(log: &File) -> io::Result<()> {
     rustix::stdio::dup2_stderr(log)?;
     rustix::stdio::dup2_stdout(log)?;
