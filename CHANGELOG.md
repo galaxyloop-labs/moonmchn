@@ -1,5 +1,19 @@
 # Moon MCHN Changelog
 
+## v0.2.1 - 2026-11-18
+
+### Bug Fixes
+
+- Cap each machine's log lines and rotate the daemon log at 8 MiB (#8) [#8](https://github.com/galaxyloop-labs/moonmchn/pull/8) (@jodosha)
+
+### Documentation
+
+- ROADMAP (@jodosha)
+
+### Chores
+
+- **deps**: Bump toml to 1.2.1+spec-1.1.0 (#7) [#7](https://github.com/galaxyloop-labs/moonmchn/pull/7) (@dependabot[bot])
+
 ## v0.2.0 - 2026-11-12
 
 ### Bug Fixes
@@ -27,6 +41,7 @@
 
 ### Chores
 
+- Release v0.2.0 (@jodosha)
 - Release automation (@jodosha)
 - Gitignore `docs/` (@jodosha)
 
