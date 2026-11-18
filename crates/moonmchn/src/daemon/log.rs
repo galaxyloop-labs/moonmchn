@@ -153,13 +153,9 @@ fn log_exists(path: &Path) -> Result<bool> {
     std::fs::exists(path).map_err(|err| Error::io(path, err))
 }
 
-/// Renames the log `from` to `to` with `rename`, skipping a `from` deleted while the daemon ran.
+/// Renames the log `from` to `to` with `rename`.
 fn move_log(from: &Path, to: &Path, rename: impl Fn(&Path, &Path) -> io::Result<()>) -> Result<()> {
-    match rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(Error::io(from, err)),
-    }
+    rename(from, to).map_err(|err| Error::io(from, err))
 }
 
 /// Returns whether `line` and the newline after it fit in a log that holds `len` bytes, without

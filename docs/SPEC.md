@@ -164,7 +164,8 @@ by IDNA (Internationalized Domain Names in Applications), so `Bücher.example.` 
 `*`. A `*` inside a label, a `*.` followed by nothing or by another `*`, an empty
 pattern or label, and a `host:port` entry fail to load, naming the pattern and the rule.
 
-- A missing `allow`, or `allow = []`, allows nothing: every flow is denied and logged.
+- A missing `allow`, or `allow = []`, allows nothing: every flow is denied, and logged
+  within the machine's line budget (see [Egress](#egress)).
 - `allow = ["*"]` allows every host but the built-in denies and the host itself,
   whatever else it lists.
 - No entry opens the host itself: a loopback or unspecified address, the guest's own
