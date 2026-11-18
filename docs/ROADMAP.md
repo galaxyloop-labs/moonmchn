@@ -23,3 +23,4 @@ Read [CHANGELOG.md](../CHANGELOG.md) for what was already built.
 - **Services:** Sidekick, pre-built VMs with a single running service (e.g. Postgres, Redis, etc...).
 - **VPN:** a private, encrypted channel between the `mchn` CLI and its daemon, on the same host and, later, to a daemon on another host.
 - **Nix binary cache** for faster package installs.
+- **Logger:** one logger for every line the daemon writes.
