@@ -194,6 +194,35 @@ fn an_unreadable_marker_denies_its_token() {
     assert!(common::marker(dir.path(), "alpha").exists());
 }
 
+#[test]
+fn a_guest_cannot_grow_the_log_past_its_budget() {
+    let (dir, client, daemon) = daemon_with_thread();
+    client.machine_start("theta", spec_with(&[], &[])).unwrap();
+    let token = common::token_in(dir.path(), "theta");
+    let decider = decider(dir.path());
+
+    // Each flow goes to an address of its own: a budget kept per destination would log every
+    // one of them.
+    for i in 1..=100 {
+        let destination = format!("192.0.2.{i}:443");
+        let flow = request(&token, &destination, &[]);
+
+        assert_eq!(ask(decider, &flow), b'n');
+    }
+
+    let out = shut_down(&client, daemon);
+    assert_denied(&out, "theta", "192.0.2.1:443", "no list allows it");
+
+    // The budget's size is the decider's unit tests' to pin; here, the flood only has to log
+    // fewer lines than it sent flows.
+    let count = out
+        .lines()
+        .filter(|line| line.contains("theta") && line.contains("no list allows it"))
+        .count();
+
+    assert!(count < 100, "{count} lines deny theta's flows\n{out}");
+}
+
 /// The decider's address for the daemon in `dir`: the loopback, at the port in `egress/port`.
 fn decider(dir: &Path) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, common::egress_port(dir)))

@@ -164,7 +164,8 @@ by IDNA (Internationalized Domain Names in Applications), so `Bücher.example.` 
 `*`. A `*` inside a label, a `*.` followed by nothing or by another `*`, an empty
 pattern or label, and a `host:port` entry fail to load, naming the pattern and the rule.
 
-- A missing `allow`, or `allow = []`, allows nothing: every flow is denied and logged.
+- A missing `allow`, or `allow = []`, allows nothing: every flow is denied, and logged
+  within the machine's line budget (see [Egress](#egress)).
 - `allow = ["*"]` allows every host but the built-in denies and the host itself,
   whatever else it lists.
 - No entry opens the host itself: a loopback or unspecified address, the guest's own
@@ -371,7 +372,9 @@ Moon MCHN never changes existing permissions.
 |---|---|---|
 | `daemon.sock` | protected by the directory | the Unix socket clients connect to |
 | `daemon.pid` | `0600` | locked for as long as the daemon runs, and for as long as an operation it abandoned at the teardown still runs; holds its pid for humans |
-| `daemon.log` | `0600` | appended to; receives the daemon's output after startup |
+| `daemon.log` | `0600` | appended to; receives the daemon's output after startup; rotates at 8 MiB, as below |
+| `daemon.log.1` to `daemon.log.15` | `0600` | the previous logs, `daemon.log.1` the most recent |
+| `daemon.log.new` | `0600` | the fresh log while a rotation runs; it becomes `daemon.log` when the rotation ends, and a rotation that failed leaves it, empty, for the next attempt |
 | `machines/` | `0700` | one record per machine; see [Records](#records) |
 | `egress/` | `0700` | holds `port` |
 | `egress/port` | `0600` | the port on `127.0.0.1` where the daemon listens for egress decisions; see below |
@@ -380,6 +383,42 @@ The lock on `daemon.pid` decides whether a daemon is running. Files left behind 
 a daemon that crashed need no cleanup: the next `daemon start` takes the lock and
 replaces them. Machine records and `egress/port` are the exceptions: they stay, and
 the next daemon reads them.
+
+The logs stay as well: the next daemon appends to `daemon.log`. Before the decider
+writes a line that would take `daemon.log` past 8 MiB, the daemon rotates the logs
+the way `logrotate` numbers them: each previous log moves one number up, replacing
+`daemon.log.15` at the top, `daemon.log` becomes `daemon.log.1`, and a fresh
+`daemon.log` takes that line and the daemon's output from then on. The decider's
+lines therefore fill at most 16 files of 8 MiB, 128 MiB in all. The daemon's
+stdout and stderr point at `daemon.log` too: its own lines, such as `stopped`, and
+a panic message count toward a file's 8 MiB, but only a line from the decider
+starts a rotation.
+
+A rotation opens the fresh log first, as `daemon.log.new`, and renames it
+`daemon.log` last. When it fails, because the fresh log cannot open or a log cannot
+move, it stops there: no log moves over the one that stayed, the decider's line is
+dropped, and the next line tries again. That attempt carries on from where the
+last one stopped, so a rotation replaces `daemon.log.15` once, however many
+attempts it takes. The daemon reports the first line it drops, as
+`egress: lines dropped: <error>`, in the log it still writes to.
+
+A rotation ends by pointing the daemon's stdout and stderr at the fresh log. When
+that fails, the decider's line is written to the fresh log all the same, and the
+daemon reports the failure there once, as
+`egress: the daemon's own lines still go to the previous log: <error>`. It tries
+again ahead of each of the decider's next lines, and no retry moves a log. Until
+it succeeds, the daemon's own lines land in `daemon.log.1`, with a panic message
+when stderr stayed behind, and a daemon that stops first leaves `stopped` there.
+
+Every rotation leaves the previous logs numbered in sequence, from `daemon.log.1`
+up. A previous log can be deleted at any time: the next rotation closes the gap,
+and replaces no log. To empty `daemon.log` while the daemon runs, truncate it in
+place, as `: > daemon.log` does. The daemon holds it open for appending, so a
+deleted `daemon.log` keeps taking the daemon's lines, unseen, until the next
+rotation opens a fresh one.
+
+To follow the log, use `tail -F daemon.log`: it reopens `daemon.log` when a
+rotation replaces it, while `tail -f` stays on the file that became `daemon.log.1`.
 
 A machine can outlive the daemon that started it: a daemon killed outright or
 crashed leaves its machines running, and so does one whose stop of a machine fails
@@ -562,7 +601,8 @@ running: a process on the port then receives their tokens and may allow every fl
 tokens buy nothing beyond that verdict, and the next `daemon start` refuses to run while
 the port is held, which is how a takeover shows.
 
-The decider writes one line per event to the daemon's log, each starting `egress: `:
+The decider writes one line per event to the daemon's log, each starting `egress: `,
+within the limits below:
 
 | Line | When |
 |---|---|
@@ -572,7 +612,10 @@ The decider writes one line per event to the daemon's log, each starting `egress
 | `egress: denied 127.0.0.1:51941: bad preamble, short read` | a request the decider cannot read, once per peer address |
 | `egress: denied 192.0.2.1:443: unknown token` | a token no machine has, once per destination address |
 | `egress: accept failed: <error>`, `egress: listener failed: <error>` | the listener's own errors |
+| `egress: a: 12 lines dropped: more than 60 in 60 s` | the lines machine `a` dropped past its budget, written ahead of its next line in a new window |
 | `egress: 37 lines dropped: the log fell behind` | lines that came faster than the daemon wrote them: past 1024 waiting, each new one overwrites the oldest |
+| `egress: lines dropped: <error>` | a line the daemon could not write, as when the log fails to rotate: written for the first one, then again only once a line got through |
+| `egress: the daemon's own lines still go to the previous log: <error>` | a rotation that could not point the daemon's stdout and stderr at the fresh log: written at the top of that log for the first failure, then again only once they followed and a later rotation failed the same way |
 
 - A deny's reason is one of `loopback`, `guest link`, `host address`, `built-in deny`,
   `listed in deny`, `no name to check against deny` and `no list allows it`.
@@ -582,6 +625,12 @@ The decider writes one line per event to the daemon's log, each starting `egress
   `was not looked up: too many lookups running`.
 - A bad preamble reads `short read`, `wrong magic`, `unknown address family <n>`,
   `opening bytes length <n> over 8192`, or an I/O error.
+- A machine's lines, its denies and its dropped names together, have a budget of 60
+  per 60 seconds, starting with its first line. The lines past it are dropped and
+  counted, and the count leads the machine's first line once the 60 seconds are
+  over, so a machine that falls silent never logs its last count. The queue's
+  `the log fell behind` is a separate count: lines from any source, lost before the
+  daemon wrote them.
 - An allowed flow leaves no line, and no line carries a token.
 
 ## Machines

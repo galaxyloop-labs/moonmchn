@@ -17,6 +17,7 @@ mod egress;
 pub mod fuzzing;
 mod instance;
 mod launcher;
+mod log;
 mod machines;
 mod state;
 pub use launcher::Start;

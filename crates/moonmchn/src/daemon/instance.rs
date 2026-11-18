@@ -14,10 +14,7 @@ const LOCK_FILE_NAME: &str = "daemon.pid";
 /// The name of the socket file
 const SOCKET_FILE_NAME: &str = "daemon.sock";
 
-/// The name of the log file
-const LOG_FILE_NAME: &str = "daemon.log";
-
-/// The mode of the lock and log files.
+/// The mode of the lock file.
 const FILE_MODE: u32 = 0o600;
 
 pub(super) fn lock(dir: &Path) -> Result<File> {
@@ -81,17 +78,6 @@ pub(super) fn claim(dir: &Path) -> Result<File> {
     drop(std::fs::remove_file(socket_path(dir)));
 
     Ok(file)
-}
-
-pub(super) fn open_log(dir: &Path) -> Result<File> {
-    let path = dir.join(LOG_FILE_NAME);
-
-    OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(FILE_MODE)
-        .open(&path)
-        .map_err(|e| Error::io(&path, e))
 }
 
 pub(super) fn socket_path(dir: &Path) -> PathBuf {
@@ -211,29 +197,5 @@ mod tests {
 
         // Assert socket is gone
         assert!(!fs::exists(&socket_path).unwrap());
-    }
-
-    #[test]
-    fn open_log_file() {
-        let log_dir = tempfile::tempdir().unwrap();
-        let mut file1 = super::open_log(log_dir.path()).unwrap();
-
-        file1.write_all(b"test 1\n").unwrap();
-
-        let mode = file1.metadata().unwrap().mode() & 0o7777;
-        assert_eq!(mode, 0o600);
-        assert_eq!(
-            fs::read_to_string(log_dir.path().join(super::LOG_FILE_NAME)).unwrap(),
-            "test 1\n"
-        );
-
-        // Open again and append
-        let mut file2 = super::open_log(log_dir.path()).unwrap();
-        file2.write_all(b"test 2\n").unwrap();
-
-        assert_eq!(
-            fs::read_to_string(log_dir.path().join(super::LOG_FILE_NAME)).unwrap(),
-            "test 1\ntest 2\n"
-        );
     }
 }

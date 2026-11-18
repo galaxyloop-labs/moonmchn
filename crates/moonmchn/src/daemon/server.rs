@@ -19,7 +19,7 @@ use tokio::task::JoinSet;
 
 use crate::daemon::api::{Reply, Request, Status};
 use crate::daemon::machines::Machines;
-use crate::daemon::{decider, egress, instance, state};
+use crate::daemon::{decider, egress, instance, log, state};
 use crate::machine::Engine;
 use crate::{Error, Result};
 
@@ -76,8 +76,9 @@ pub enum Mode {
 /// happen until the daemon notices a shutdown, and the ones queued by then are written ahead of
 /// the teardown's own; a line sent during the teardown is dropped, so `stopped` stays the last
 /// line. At most `LOG_LINES_MAX` of them wait: past that, the oldest go, and one line counts
-/// them. Requests are admitted ahead of the decider's lines, so a guest whose denied flows keep
-/// coming cannot hold off one.
+/// them. A line that cannot be written, as when the detached daemon's log fails to rotate, is
+/// dropped, and `out` gets one line for the first of a run. Requests are admitted ahead of the
+/// decider's lines, so a guest whose denied flows keep coming cannot hold off one.
 ///
 /// The daemon serves until a shutdown request or `SIGTERM`, then tears down: it closes
 /// admission, waits up to `teardown_timeout` for every accepted request to finish, boots in
@@ -135,15 +136,17 @@ pub fn serve_in<E: Engine>(
         let listener = UnixListener::bind(&socket).map_err(|e| Error::io(&socket, e))?;
         let mut sigterm = unix::signal(SignalKind::terminate()).map_err(Error::DaemonServe)?;
 
-        let log = match mode {
-            Mode::Detached => Some(instance::open_log(dir)?),
+        let log_file = match mode {
+            Mode::Detached => Some(log::open(dir)?),
             Mode::Foreground => None,
         };
         // A broadcast channel, for its ring: the decider never waits to send, at most
         // `LOG_LINES_MAX` lines wait to be written, and the reader learns how many it lost.
         let (log_tx, mut log_rx) = broadcast::channel::<String>(LOG_LINES_MAX);
         let decider = tokio::spawn(decider::serve::<E::Gateway>(Arc::clone(&egress), log_tx));
-        announce_ready(out, &socket, log.as_ref())?;
+        announce_ready(out, &socket, log_file.as_ref())?;
+        // Writes the decider's lines, and takes the log once the ready line is out.
+        let mut writer = log::Writer::new(dir, log_file, redirect_output);
 
         // Every request handler, so the teardown can wait for them all.
         let mut handlers = JoinSet::new();
@@ -175,16 +178,14 @@ pub fn serve_in<E: Engine>(
                 // so the lines still queued once the loop ends are written after it. Once the
                 // decider is gone, `next_line` yields `None`, which disables this branch for this
                 // turn of the loop.
-                Some(line) = next_line(&mut log_rx) => {
-                    drop(writeln!(out, "{line}"));
-                }
+                Some(line) = next_line(&mut log_rx) => writer.write_line(out, &line),
             }
         }
 
         // A line the decider sent before the shutdown was noticed comes ahead of the teardown's
         // own.
         while let Some(line) = queued_line(&mut log_rx) {
-            drop(writeln!(out, "{line}"));
+            writer.write_line(out, &line);
         }
 
         // After a shutdown request and after `SIGTERM` alike.
@@ -423,6 +424,16 @@ async fn send<T: Serialize>(stream: &mut OwnedWriteHalf, result: Result<T>) -> i
     };
 
     send_reply(stream, &reply).await
+}
+
+/// Points the daemon's stderr and stdout at `log`, so its own lines follow the log it rotated to.
+///
+/// The log's writer calls it again after a failure, even one that left stderr moved and stdout
+/// behind: each `dup2` sets its descriptor whatever it pointed at.
+fn redirect_output(log: &File) -> io::Result<()> {
+    rustix::stdio::dup2_stderr(log)?;
+    rustix::stdio::dup2_stdout(log)?;
+    Ok(())
 }
 
 #[cfg(test)]

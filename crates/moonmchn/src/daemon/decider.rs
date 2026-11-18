@@ -13,7 +13,7 @@
 //! alone.
 
 use rustls::server::{Accepted, Acceptor};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -23,6 +23,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
+use tokio::time::Instant;
 
 use crate::config::{Egress, Subject};
 use crate::daemon::egress::{State, Token};
@@ -46,6 +47,16 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// resolver's socket until the resolver gives up. Over the cap, a claimed name is not looked up
 /// at all, so lookups that never end cannot use up the daemon's threads and open files.
 const LOOKUPS_MAX: usize = 32;
+
+/// The most lines one machine's flows may log in one `LINE_WINDOW`, its denies and its claimed
+/// names that bind no name together. Past it, the lines are dropped and counted, and the count
+/// is logged ahead of the machine's first line in its next window, so a guest whose flows keep
+/// being denied cannot grow the daemon's log faster than that.
+const LINES_PER_WINDOW: usize = 60;
+
+/// How long a window lasts. A machine's budget of `LINES_PER_WINDOW` lines starts over with its
+/// first line after the window ends.
+const LINE_WINDOW: Duration = Duration::from_secs(60);
 
 /// Why a flow's request could not be read. `Display` gives the words that follow
 /// `bad preamble,` in the log line.
@@ -148,6 +159,77 @@ impl fmt::Display for Unbound {
     }
 }
 
+/// What `LineBudget::spend` lets a machine send for one of its lines.
+enum ToSend {
+    /// The line: the window has room for it.
+    Line,
+    /// Nothing: the window is full, so the line is dropped and counted.
+    Nothing,
+    /// The count of the lines the last window dropped, which is above zero, then the line,
+    /// which opens the new window.
+    CountThenLine(usize),
+}
+
+/// One machine's share of the log within `LINE_WINDOW`: the lines its flows sent, and those past
+/// `LINES_PER_WINDOW` that were dropped. The count of the dropped ones is logged ahead of the
+/// machine's first line in its next window.
+struct LineBudget {
+    /// When the current window started: with the machine's first line after the last window
+    /// ended. It reads tokio's clock, which a test can pause and move.
+    window_start: Instant,
+    /// How many lines the machine's flows sent in the current window, `LINES_PER_WINDOW` at
+    /// most.
+    lines_used: usize,
+    /// How many lines the machine's flows tried to send in the current window once
+    /// `lines_used` reached `LINES_PER_WINDOW`: none of them was sent.
+    lines_dropped: usize,
+}
+
+impl LineBudget {
+    /// A budget whose first window starts at `now`, with no line sent or dropped yet.
+    fn new(now: Instant) -> Self {
+        Self {
+            window_start: now,
+            lines_used: 0,
+            lines_dropped: 0,
+        }
+    }
+
+    /// Spends one line of the budget at `now`, and returns what to send for it:
+    ///
+    /// - the line alone while the window has room for it, `LINES_PER_WINDOW` lines in all;
+    /// - nothing once the window is full: the line counts as dropped;
+    /// - once `LINE_WINDOW` has passed since the window started, the line opens a new window as
+    ///   its first line, preceded by the count of the lines the last window dropped, if it
+    ///   dropped any.
+    fn spend(&mut self, now: Instant) -> ToSend {
+        if now.duration_since(self.window_start) >= LINE_WINDOW {
+            let previously_dropped = self.lines_dropped;
+
+            // The line opens the new window, as its first.
+            *self = Self {
+                lines_used: 1,
+                ..Self::new(now)
+            };
+
+            if previously_dropped == 0 {
+                return ToSend::Line;
+            }
+
+            return ToSend::CountThenLine(previously_dropped);
+        }
+
+        if self.lines_used >= LINES_PER_WINDOW {
+            self.lines_dropped = self.lines_dropped.saturating_add(1);
+
+            return ToSend::Nothing;
+        }
+
+        self.lines_used = self.lines_used.saturating_add(1);
+        ToSend::Line
+    }
+}
+
 /// Answers the engine's gateways on the egress listener in `state` until the daemon ends: each
 /// connection the listener accepts gets a task of its own, which `handle_flow` runs. The lines
 /// they log go to `log`.
@@ -158,9 +240,10 @@ impl fmt::Display for Unbound {
 /// `egress: listener failed: <error>`, and `serve` returns: the error of a spawned task reaches
 /// nobody.
 ///
-/// Every connection shares two things: the addresses logged already, of the peers with a bad
-/// preamble and of the destinations with an unknown token, so each address is logged once; and
-/// the cap of `LOOKUPS_MAX` lookups running at once.
+/// Every connection shares three things: the addresses logged already, of the peers with a bad
+/// preamble and of the destinations with an unknown token, so each address is logged once; each
+/// machine's `LineBudget`, so the lines its flows log stay within `LINES_PER_WINDOW`, whichever
+/// connections carry them; and the cap of `LOOKUPS_MAX` lookups running at once.
 pub(super) async fn serve<G: Gateway>(state: Arc<State>, log: broadcast::Sender<String>) {
     let listener = state.listener().and_then(|listener| {
         listener.set_nonblocking(true)?;
@@ -177,6 +260,9 @@ pub(super) async fn serve<G: Gateway>(state: Arc<State>, log: broadcast::Sender<
     // ponytail: one entry per distinct address, never cleared; add a cap if logs show it
     // growing large.
     let logged = Arc::new(Mutex::new(HashSet::new()));
+    // ponytail: one entry per machine name, kept after the machine stops; remove it on stop if
+    // names churn.
+    let budgets = Arc::new(Mutex::new(HashMap::new()));
     // ponytail: one cap for every machine, so one guest's stuck lookups turn away the names of
     // all; a cap per machine if that bites.
     let lookups = Arc::new(Semaphore::new(LOOKUPS_MAX));
@@ -189,6 +275,7 @@ pub(super) async fn serve<G: Gateway>(state: Arc<State>, log: broadcast::Sender<
                     Arc::clone(&state),
                     log.clone(),
                     Arc::clone(&logged),
+                    Arc::clone(&budgets),
                     Arc::clone(&lookups),
                 ));
             }
@@ -217,6 +304,12 @@ pub(super) async fn serve<G: Gateway>(state: Arc<State>, log: broadcast::Sender<
 /// - `denied <machine> to https://<name> (<ip>:<port>): <reason>`, for a deny of a flow with a
 ///   bound name, and `denied <machine> to <ip>:<port>: <reason>` for one without.
 ///
+/// The last two come from a machine its token named, so they spend that machine's budget in
+/// `budgets`, as `send_within_budget` has it: past `LINES_PER_WINDOW` lines in a `LINE_WINDOW`,
+/// they are dropped and counted, and the count leads the machine's first line in its next
+/// window. The guest picks its flows' names and destinations, so the budget counts by the
+/// machine alone.
+///
 /// A line is sent before the byte is written, so a gateway that has read the byte finds the
 /// line sent already. An error writing the byte, or sending a line, is dropped: the gateway may
 /// be gone, and a daemon past its teardown drains no more lines.
@@ -226,6 +319,7 @@ async fn handle_flow<G: Gateway, S: AsyncRead + AsyncWrite + Unpin>(
     state: Arc<State>,
     log: broadcast::Sender<String>,
     logged: Arc<Mutex<HashSet<IpAddr>>>,
+    budgets: Arc<Mutex<HashMap<String, LineBudget>>>,
     lookups: Arc<Semaphore>,
 ) {
     let flow = tokio::time::timeout(READ_TIMEOUT, read_flow::<G>(&mut stream))
@@ -265,7 +359,8 @@ async fn handle_flow<G: Gateway, S: AsyncRead + AsyncWrite + Unpin>(
         Some(claimed) => match bind_name(&claimed, destination, &lookups).await {
             Ok(name) => name,
             Err(unbound) => {
-                drop(log.send(format!("egress: {claimed} {unbound}")));
+                let line = format!("egress: {claimed} {unbound}");
+                send_within_budget(&log, &budgets, &machine, line);
                 None
             }
         },
@@ -287,11 +382,48 @@ async fn handle_flow<G: Gateway, S: AsyncRead + AsyncWrite + Unpin>(
                 Some(name) => format!("{HTTPS_SCHEME}://{name} ({destination})"),
                 None => destination.to_string(),
             };
-            drop(log.send(format!("egress: denied {machine} to {target}: {reason}")));
+            let line = format!("egress: denied {machine} to {target}: {reason}");
+            send_within_budget(&log, &budgets, &machine, line);
             G::DENY
         }
     };
     drop(stream.write_all(&[reply]).await);
+}
+
+/// Sends `line` through `log` as the budget of `machine` in `budgets` allows it now: the line
+/// alone, nothing once the budget is spent, or, in a new window after the last one dropped
+/// lines, `egress: <machine>: <n> lines dropped: more than <max> in <window> s` ahead of it,
+/// with `LINES_PER_WINDOW` and `LINE_WINDOW` in seconds. A machine's budget starts with its
+/// first line.
+///
+/// An error sending a line is dropped, as in `handle_flow`: a daemon past its teardown drains
+/// no more lines.
+fn send_within_budget(
+    log: &broadcast::Sender<String>,
+    budgets: &Mutex<HashMap<String, LineBudget>>,
+    machine: &str,
+    line: String,
+) {
+    // One reading of the clock, so a new budget's window starts at the instant it spends.
+    let now = Instant::now();
+    let to_send = budgets
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(machine.to_owned())
+        .or_insert_with(|| LineBudget::new(now))
+        .spend(now);
+
+    match to_send {
+        ToSend::Line => drop(log.send(line)),
+        ToSend::Nothing => {}
+        ToSend::CountThenLine(dropped) => {
+            drop(log.send(format!(
+                "egress: {machine}: {dropped} lines dropped: more than {LINES_PER_WINDOW} in {} s",
+                LINE_WINDOW.as_secs()
+            )));
+            drop(log.send(line));
+        }
+    }
 }
 
 /// Reads one flow's request from `stream` through the gateway `G`: asks it what the bytes so far
@@ -926,7 +1058,10 @@ mod tests {
         let (log, mut sent) = broadcast::channel(16);
 
         // The gateway sends nothing and stays open; with time paused, the 5 s pass at once.
-        assert_eq!(answer(&state, &log, &Arc::default(), &[]).await, b'n');
+        assert_eq!(
+            answer(&state, &log, &Arc::default(), &Arc::default(), &[]).await,
+            b'n'
+        );
 
         assert_eq!(
             lines(&mut sent),
@@ -939,15 +1074,16 @@ mod tests {
         let (_dir, state) = alpha(&["*"], &[]);
         let (log, mut sent) = broadcast::channel(16);
         let logged = Arc::default();
+        let budgets = Arc::default();
         // A length over the gateway's limit, which it refuses before any opening byte.
         let mut bytes = request(&[0xaa; 32], [192, 0, 2, 1], 443, &[]);
         *bytes.last_mut().unwrap() = 129;
 
-        assert_eq!(answer(&state, &log, &logged, &bytes).await, b'n');
+        assert_eq!(answer(&state, &log, &logged, &budgets, &bytes).await, b'n');
         // A gateway connects from a new port for every flow.
         let next_port = SocketAddr::from(([127, 0, 0, 1], 10));
         assert_eq!(
-            answer_from(next_port, &state, &log, &logged, &bytes).await,
+            answer_from(next_port, &state, &log, &logged, &budgets, &bytes).await,
             b'n'
         );
 
@@ -962,10 +1098,11 @@ mod tests {
         let (_dir, state) = alpha(&["*"], &[]);
         let (log, mut sent) = broadcast::channel(16);
         let logged = Arc::default();
+        let budgets = Arc::default();
         let bytes = request(&[0xbb; 32], [192, 0, 2, 1], 443, &[]);
 
-        assert_eq!(answer(&state, &log, &logged, &bytes).await, b'n');
-        assert_eq!(answer(&state, &log, &logged, &bytes).await, b'n');
+        assert_eq!(answer(&state, &log, &logged, &budgets, &bytes).await, b'n');
+        assert_eq!(answer(&state, &log, &logged, &budgets, &bytes).await, b'n');
 
         assert_eq!(
             lines(&mut sent),
@@ -981,7 +1118,10 @@ mod tests {
         // The flow sends nothing first, so it claims no name that could fail to bind and log a
         // line, and a bare `*` admits it while `deny` holds no hostname.
         let bytes = request(&[0xaa; 32], [192, 0, 2, 1], 443, &[]);
-        assert_eq!(answer(&state, &log, &Arc::default(), &bytes).await, b'y');
+        assert_eq!(
+            answer(&state, &log, &Arc::default(), &Arc::default(), &bytes).await,
+            b'y'
+        );
 
         assert_eq!(lines(&mut sent), Vec::<String>::new());
     }
@@ -994,7 +1134,10 @@ mod tests {
         // Without its name, the flow is judged by its address, which a bare `*` admits while
         // `deny` holds no hostname.
         let bytes = request(&[0xaa; 32], [192, 0, 2, 1], 443, &hello("other.invalid"));
-        assert_eq!(answer(&state, &log, &Arc::default(), &bytes).await, b'y');
+        assert_eq!(
+            answer(&state, &log, &Arc::default(), &Arc::default(), &bytes).await,
+            b'y'
+        );
 
         assert_eq!(
             lines(&mut sent),
@@ -1008,7 +1151,10 @@ mod tests {
         let (log, mut sent) = broadcast::channel(16);
 
         let bytes = request(&[0xaa; 32], [192, 0, 2, 1], 443, &hello("other.invalid"));
-        assert_eq!(answer(&state, &log, &Arc::default(), &bytes).await, b'n');
+        assert_eq!(
+            answer(&state, &log, &Arc::default(), &Arc::default(), &bytes).await,
+            b'n'
+        );
 
         assert_eq!(
             lines(&mut sent),
@@ -1027,12 +1173,127 @@ mod tests {
         let (log, mut sent) = broadcast::channel(16);
 
         let bytes = request(&[0xaa; 32], [127, 0, 0, 1], 443, &hello("localhost"));
-        assert_eq!(answer(&state, &log, &Arc::default(), &bytes).await, b'n');
+        assert_eq!(
+            answer(&state, &log, &Arc::default(), &Arc::default(), &bytes).await,
+            b'n'
+        );
 
         assert_eq!(
             lines(&mut sent),
             ["egress: denied alpha to https://localhost (127.0.0.1:443): loopback"]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_machine_over_its_budget_is_counted_in_its_next_window() {
+        let (_dir, state) = alpha(&[], &[]);
+        let (log, mut sent) = broadcast::channel(128);
+        let logged = Arc::default();
+        let budgets = Arc::default();
+        let bytes = request(&[0xaa; 32], [192, 0, 2, 1], 443, &[]);
+
+        // The first window takes 60 lines; the 2 flows past them are counted.
+        for _ in 0..62 {
+            answer(&state, &log, &logged, &budgets, &bytes).await;
+        }
+        assert_eq!(lines(&mut sent).len(), 60);
+
+        // Still in the first window: the flow is counted, and nothing is sent.
+        tokio::time::advance(Duration::from_secs(59)).await;
+        answer(&state, &log, &logged, &budgets, &bytes).await;
+        assert_eq!(lines(&mut sent), Vec::<String>::new());
+
+        // A new window: the last one's count comes first, then the flow's own line.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        answer(&state, &log, &logged, &budgets, &bytes).await;
+        assert_eq!(
+            lines(&mut sent),
+            [
+                "egress: alpha: 3 lines dropped: more than 60 in 60 s",
+                "egress: denied alpha to 192.0.2.1:443: no list allows it",
+            ]
+        );
+
+        // The line that opened the window counts as its first, so 59 more fill it, and the
+        // count is written once: 61 flows send 59 lines, and the 2 past them are counted.
+        for _ in 0..61 {
+            answer(&state, &log, &logged, &budgets, &bytes).await;
+        }
+        assert_eq!(lines(&mut sent).len(), 59);
+
+        // The next window counts only the 2 lines this one dropped: the earlier 3 were reported
+        // already.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        answer(&state, &log, &logged, &budgets, &bytes).await;
+        assert_eq!(
+            lines(&mut sent),
+            [
+                "egress: alpha: 2 lines dropped: more than 60 in 60 s",
+                "egress: denied alpha to 192.0.2.1:443: no list allows it",
+            ]
+        );
+
+        // A window that dropped nothing leaves no count: the next one opens with the line alone.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        answer(&state, &log, &logged, &budgets, &bytes).await;
+        assert_eq!(
+            lines(&mut sent),
+            ["egress: denied alpha to 192.0.2.1:443: no list allows it"]
+        );
+    }
+
+    #[tokio::test]
+    async fn each_machine_has_a_budget_of_its_own() {
+        // Beta, whose token is `[0xcc; 32]`, under the same empty lists as alpha.
+        let (_dir, state) = alpha(&[], &[]);
+        state.register(
+            "beta",
+            &Marker {
+                egress: MarkerEgress {
+                    token: Token([0xcc; 32]),
+                },
+                spec: Spec {
+                    egress: egress(&[], &[]),
+                    ..Spec::default()
+                },
+            },
+        );
+        let (log, mut sent) = broadcast::channel(128);
+        let logged = Arc::default();
+        let budgets = Arc::default();
+
+        // Alpha uses up its budget: 60 lines, and its 61st flow is counted.
+        let from_alpha = request(&[0xaa; 32], [192, 0, 2, 1], 443, &[]);
+        for _ in 0..61 {
+            answer(&state, &log, &logged, &budgets, &from_alpha).await;
+        }
+        assert_eq!(lines(&mut sent).len(), 60);
+
+        // Beta's budget is untouched, so its first flow is logged.
+        let from_beta = request(&[0xcc; 32], [192, 0, 2, 1], 443, &[]);
+        answer(&state, &log, &logged, &budgets, &from_beta).await;
+        assert_eq!(
+            lines(&mut sent),
+            ["egress: denied beta to 192.0.2.1:443: no list allows it"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_name_and_its_deny_share_one_budget() {
+        let (_dir, state) = alpha(&[], &[]);
+        let (log, mut sent) = broadcast::channel(128);
+        let logged = Arc::default();
+        let budgets = Arc::default();
+
+        // Each flow sends two lines: its claim of `localhost` binds no name, since the hosts file
+        // maps it to loopback, and the flow is then denied by its address.
+        let bytes = request(&[0xaa; 32], [192, 0, 2, 1], 443, &hello("localhost"));
+        for _ in 0..31 {
+            answer(&state, &log, &logged, &budgets, &bytes).await;
+        }
+
+        // Thirty flows fill the budget, so the 31st sends neither of its lines.
+        assert_eq!(lines(&mut sent).len(), 60);
     }
 
     /// A request as `FakeGateway` reads one: `token`, `ip`, `port`, then the length of `opening`
@@ -1123,6 +1384,7 @@ mod tests {
         state: &Arc<State>,
         log: &broadcast::Sender<String>,
         logged: &Arc<Mutex<HashSet<IpAddr>>>,
+        budgets: &Arc<Mutex<HashMap<String, LineBudget>>>,
         bytes: &[u8],
     ) -> u8 {
         answer_from(
@@ -1130,6 +1392,7 @@ mod tests {
             state,
             log,
             logged,
+            budgets,
             bytes,
         )
         .await
@@ -1141,6 +1404,7 @@ mod tests {
         state: &Arc<State>,
         log: &broadcast::Sender<String>,
         logged: &Arc<Mutex<HashSet<IpAddr>>>,
+        budgets: &Arc<Mutex<HashMap<String, LineBudget>>>,
         bytes: &[u8],
     ) -> u8 {
         let (mut gateway, decider) = duplex(1024);
@@ -1152,6 +1416,7 @@ mod tests {
             Arc::clone(state),
             log.clone(),
             Arc::clone(logged),
+            Arc::clone(budgets),
             Arc::new(Semaphore::new(1)),
         )
         .await;
