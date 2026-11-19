@@ -14,6 +14,11 @@ header = """
 #
 # Groups come out of group_by in alphabetical order. The `<!-- N -->` prefix
 # set in commit_parsers fixes their order; striptags removes it again.
+#
+# `make changelog` rewrites this whole file, so text added by hand is lost. A
+# commit's upgrade steps go in its `BREAKING CHANGE:` footer, which prints
+# under its entry, indented into the list item. The footer must end the squash
+# commit's message: the lines after it print as part of it.
 body = """
 {% if version or commits %}
 {% if version %}\
@@ -31,6 +36,9 @@ body = """
 {{ commit.message | split(pat="\n") | first | trim | upper_first }}\
 {% if commit.remote.pr_number %} [#{{ commit.remote.pr_number }}](https://github.com/galaxyloop-labs/moonmchn/pull/{{ commit.remote.pr_number }}){% endif %}\
 {% if commit.remote.username %} (@{{ commit.remote.username }}){% endif %}
+{% for footer in commit.footers | filter(attribute="breaking", value=true) %}
+{{ footer.value | indent(prefix="  ", first=true) }}
+{% endfor %}\
 {% endfor %}\
 {% endfor %}\
 {% endif %}\
@@ -55,8 +63,10 @@ tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
 sort_commits = "newest"
 
 # The PR number comes from GitHub; drop the copy a squash merge leaves in the subject.
+# `(?m)` lets `$` match the subject's end in a message with a body, and `\A` with
+# `[^\n]` keeps the match on that first line, so a body line ending in `(#N)` stays.
 commit_preprocessors = [
-  { pattern = '\s*\(#[0-9]+\)$', replace = "" },
+  { pattern = '(?m)\A([^\n]*?)[ \t]*\(#[0-9]+\)$', replace = "${1}" },
 ]
 
 commit_parsers = [

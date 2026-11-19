@@ -259,13 +259,11 @@ mod tests {
                     source: "/host/path with spaces".into(),
                     target: "/workspace".into(),
                     read_only: false,
-                    staged: true,
                 },
                 Mount {
                     source: "s3://bucket/models".into(),
                     target: "/models".into(),
                     read_only: true,
-                    staged: false,
                 },
             ],
             resources: Resources {
@@ -294,13 +292,11 @@ mod tests {
 source = "/host/path with spaces"
 target = "/workspace"
 read_only = false
-staged = true
 
 [[mounts]]
 source = "s3://bucket/models"
 target = "/models"
 read_only = true
-staged = false
 
 [resources]
 cpus = 4
@@ -347,22 +343,6 @@ deny = ["upload.pypi.org"]
             "mounts = []\n\n[resources]\n\n[egress]\nallow = []\ndeny = []\n"
         );
         assert_eq!(toml::from_str::<Config>(&contents).unwrap(), config);
-    }
-
-    #[test]
-    fn omitted_mount_modes_remain_writable_and_unstaged() {
-        let config: Config =
-            toml::from_str("[[mounts]]\nsource = '/host'\ntarget = '/workspace'").unwrap();
-        assert_eq!(
-            config.mounts,
-            [Mount {
-                source: "/host".into(),
-                target: "/workspace".into(),
-                read_only: false,
-                staged: false,
-            }]
-        );
-        assert_eq!(config.resources, Resources::default());
     }
 
     #[test]

@@ -593,7 +593,6 @@ fn accepts_a_large_spec() {
                 source: format!("/host/{i:054}"),
                 target: format!("/guest/{i:053}"),
                 read_only: false,
-                staged: false,
             })
             .collect(),
         ..spec()
@@ -1258,13 +1257,12 @@ fn pin(spec: Spec, digest: &str) -> Spec {
     }
 }
 
-/// A writable, unstaged mount of `source` at `target`.
+/// A writable mount of `source` at `target`.
 fn mount(source: &str, target: &str) -> Mount {
     Mount {
         source: source.to_string(),
         target: target.to_string(),
         read_only: false,
-        staged: false,
     }
 }
 

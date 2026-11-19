@@ -35,6 +35,12 @@ use moonmchn::{
     machine::Spec,
 };
 
+/// The value of [`smolmachines::Mount::staged`] in every SDK mount.
+/// A staged mount copies the source into guest-local storage at start, but we want mounts
+/// to be a reference of the host counterpart, so that the guest sees changes to the host
+/// and vice versa.
+const STAGE_MOUNTS: bool = false;
+
 /// Converts a machine's spec into an SDK config with a caller-supplied name.
 ///
 /// The image boots as [`ImageSpec::pinned`](moonmchn::machine::ImageSpec::pinned) names it:
@@ -88,7 +94,7 @@ pub fn mount(mount: Mount) -> smolmachines::Mount {
         source: mount.source,
         target: mount.target,
         read_only: mount.read_only,
-        staged: mount.staged,
+        staged: STAGE_MOUNTS,
     }
 }
 
@@ -112,7 +118,7 @@ mod tests {
         machine::{ImageSpec, Spec},
     };
 
-    use super::{egress_endpoint, machine_config, mount, port, resources};
+    use super::{egress_endpoint, machine_config, port, resources};
 
     #[test]
     fn every_setting_is_preserved_from_spec_to_sdk_config() {
@@ -126,13 +132,11 @@ mod tests {
                     source: "/host/path with spaces".into(),
                     target: "/workspace".into(),
                     read_only: false,
-                    staged: true,
                 },
                 Mount {
                     source: "s3://bucket/models".into(),
                     target: "/models".into(),
                     read_only: true,
-                    staged: false,
                 },
             ],
             resources: Resources {
@@ -157,7 +161,7 @@ mod tests {
         assert_eq!(
             machine.mounts,
             [
-                smolmachines::Mount::new("/host/path with spaces", "/workspace").staged(),
+                smolmachines::Mount::new("/host/path with spaces", "/workspace"),
                 smolmachines::Mount::new("s3://bucket/models", "/models").read_only(),
             ]
         );
@@ -283,24 +287,6 @@ mod tests {
             assert_eq!(converted.storage_gib, Some(disk));
             assert_eq!(converted.overlay_gib, Some(disk));
             assert_eq!(converted.gpu_vram_mib, Some(memory));
-        }
-    }
-
-    #[test]
-    fn mount_conversion_preserves_modes_without_validation() {
-        for read_only in [false, true] {
-            for staged in [false, true] {
-                let converted = mount(Mount {
-                    source: "/host/path with spaces".into(),
-                    target: "/workspace".into(),
-                    read_only,
-                    staged,
-                });
-                assert_eq!(converted.source, "/host/path with spaces");
-                assert_eq!(converted.target, "/workspace");
-                assert_eq!(converted.read_only, read_only);
-                assert_eq!(converted.staged, staged);
-            }
         }
     }
 
