@@ -140,12 +140,14 @@ deny = []
 ```
 
 To configure mounts, replace the top-level `mounts = []` with `[[mounts]]`
-sections containing `source`, `target`, `read_only`, and `staged`. A staged mount
-is writable and cannot also be read-only. Host mounts are local-only; a source
-starting with `s3://`, `gs://`, `r2://` or `rclone://` denotes a remote volume.
+sections containing `source`, `target`, and `read_only`. Host mounts are
+local-only; a source starting with `s3://`, `gs://`, `r2://` or `rclone://`
+denotes a remote volume.
 Every other source is a host directory and must be an absolute path:
 `mchn start` rejects a relative one, because the engine would resolve it
 against the daemon's working directory, wherever `daemon start` ran.
+A host mount is a live view of that directory, so the guest reads the host's
+own files, and writes them unless the mount is `read_only`.
 
 `[egress]` decides which hosts a machine's guest may reach (see [Egress](#egress)),
 with two lists of patterns, `allow` and `deny`. A pattern is one of:

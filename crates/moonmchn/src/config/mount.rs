@@ -11,32 +11,23 @@ pub struct Mount {
     /// Expose the guest view read-only.
     #[serde(default)]
     pub read_only: bool,
-    /// Copy a local source into guest storage; requires writable mode.
-    #[serde(default)]
-    pub staged: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::Mount;
 
-    fn mount(read_only: bool, staged: bool) -> Mount {
+    fn mount(read_only: bool) -> Mount {
         Mount {
             source: "/host/path with spaces".into(),
             target: "/workspace".into(),
             read_only,
-            staged,
         }
     }
 
     #[test]
     fn requires_source_and_target() {
-        for contents in [
-            "",
-            "source = '/host'",
-            "target = '/workspace'",
-            "read_only = true\nstaged = false",
-        ] {
+        for contents in ["", "source = '/host'", "target = '/workspace'"] {
             assert!(
                 toml::from_str::<Mount>(contents).is_err(),
                 "accepted {contents:?}"
@@ -45,7 +36,7 @@ mod tests {
     }
 
     #[test]
-    fn omitted_modes_default_to_writable_and_unstaged() {
+    fn omitted_read_only_defaults_to_writable() {
         let mount: Mount = toml::from_str("source = '/host'\ntarget = '/workspace'").unwrap();
         assert_eq!(
             mount,
@@ -53,35 +44,13 @@ mod tests {
                 source: "/host".into(),
                 target: "/workspace".into(),
                 read_only: false,
-                staged: false,
             }
         );
     }
 
     #[test]
-    fn every_mode_combination_deserializes_without_validation() {
-        // Mode conflicts such as a staged read-only mount are the backend's
-        // concern; the configuration type preserves what was written.
-        for (read_only, staged) in [(false, false), (true, false), (false, true), (true, true)] {
-            let contents = format!(
-                "source = '/host/path with spaces'\ntarget = '/workspace'\n\
-                 read_only = {read_only}\nstaged = {staged}\n"
-            );
-            assert_eq!(
-                toml::from_str::<Mount>(&contents).unwrap(),
-                mount(read_only, staged)
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_non_boolean_modes() {
-        for mode in [
-            "read_only = 'true'",
-            "read_only = 1",
-            "staged = 'yes'",
-            "staged = 0",
-        ] {
+    fn rejects_a_non_boolean_read_only() {
+        for mode in ["read_only = 'true'", "read_only = 1"] {
             let contents = format!("source = '/host'\ntarget = '/workspace'\n{mode}\n");
             assert!(
                 toml::from_str::<Mount>(&contents).is_err(),
@@ -96,7 +65,6 @@ mod tests {
             "readonly = true",
             "read-only = true",
             "ro = true",
-            "stage = true",
             "mode = 'ro'",
             "destination = '/workspace'",
         ] {
@@ -122,7 +90,6 @@ mod tests {
                 source: source.into(),
                 target: target.into(),
                 read_only: false,
-                staged: false,
             };
             let contents = toml::to_string(&mount).unwrap();
             let values: toml::Value = toml::from_str(&contents).unwrap();
@@ -133,17 +100,28 @@ mod tests {
     }
 
     #[test]
-    fn serialization_writes_both_modes_explicitly() {
-        // Generated files spell out each mode so readers never rely on defaults.
-        for (read_only, staged) in [(false, false), (true, true)] {
-            let mount = mount(read_only, staged);
+    fn serialization_writes_read_only_explicitly() {
+        // Generated files spell out `read_only` so readers never rely on its default.
+        for read_only in [false, true] {
+            let mount = mount(read_only);
             let contents = toml::to_string(&mount).unwrap();
             let values: toml::Value = toml::from_str(&contents).unwrap();
             let keys: Vec<_> = values.as_table().unwrap().keys().collect();
-            assert_eq!(keys, ["read_only", "source", "staged", "target"]);
+            assert_eq!(keys, ["read_only", "source", "target"]);
             assert_eq!(values["read_only"].as_bool(), Some(read_only));
-            assert_eq!(values["staged"].as_bool(), Some(staged));
             assert_eq!(toml::from_str::<Mount>(&contents).unwrap(), mount);
         }
+    }
+
+    #[test]
+    fn a_staged_key_is_refused() {
+        let contents = "source = '/host'\ntarget = '/workspace'\nstaged = false";
+
+        let error = toml::from_str::<Mount>(contents).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unknown field `staged`"),
+            "{error}"
+        );
     }
 }

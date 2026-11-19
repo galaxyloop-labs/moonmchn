@@ -150,7 +150,6 @@ mod tests {
                 source: "/host/src".to_string(),
                 target: "/workspace".to_string(),
                 read_only: true,
-                staged: false,
             }],
             resources: Resources {
                 cpus: Some(2),
