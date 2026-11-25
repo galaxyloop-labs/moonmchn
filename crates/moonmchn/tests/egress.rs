@@ -25,9 +25,12 @@ use std::time::Duration;
 mod common;
 use common::{DaemonThread, daemon, daemon_in, daemon_with_thread};
 
-/// A marker as an earlier daemon left it: the token `0123456789abcdef` four times in its
-/// `[egress]` table, above a spec whose image is pinned and whose `allow` is `["*"]`.
-const MARKER: &str = r#"[egress]
+/// A marker as an earlier daemon left it: `power = "on"`, then the token `0123456789abcdef`
+/// four times in its `[egress]` table, above a spec whose image is pinned and whose `allow` is
+/// `["*"]`.
+const MARKER: &str = r#"power = "on"
+
+[egress]
 token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [spec.image]

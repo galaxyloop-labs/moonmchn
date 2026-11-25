@@ -842,10 +842,10 @@ given included, with the digest it resolved to beside it (see [Images](#images))
 - is enough to boot the same content again: `--image <repository>@<digest>` for a
   registry image, and the same archive file, kept unchanged, for a local one.
 
-In the file, the spec sits under `[spec]`, below an `[egress]` table holding `token`,
-64 hex digits that the machine's network gateway presents to the daemon's egress
-decider. The token is random, drawn by the daemon when the machine boots and kept
-for its life; a new daemon reloads it from the record (see
+In the file, the spec sits under `[spec]`, below `power = "on"` and an `[egress]`
+table holding `token`, 64 hex digits that the machine's network gateway presents
+to the daemon's egress decider. The token is random, drawn by the daemon when the
+machine boots and kept for its life; a new daemon reloads it from the record (see
 [State directory](#state-directory)). `mchn status`, `--extended` included,
 never shows it: the daemon replies with the spec alone, so the token never reaches
 the CLI. The daemon never logs it either.

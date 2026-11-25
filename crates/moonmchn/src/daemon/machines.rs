@@ -4,12 +4,14 @@
 //!
 //! - **Markers, on disk.** One file per machine at `<state dir>/machines/<name>`, holding its
 //!   spec as TOML: what the machine was booted with, its image pinned to the digest it
-//!   resolved to. Above the spec, an `[egress]` table holds the token minted for the machine's
-//!   boot. A marker records that Moon MCHN owns a machine under that name. It outlives the
-//!   daemon, so a restarted daemon finds the machines an earlier one booted.
-//! - **The egress token map, in memory.** Loaded from the markers when the daemon starts,
-//!   filled by `register` after a marker is written, and emptied by `retire` when a machine's
-//!   marker is removed. Each boot receives its token and the daemon's bound loopback port.
+//!   resolved to. Above the spec, `power` says whether the machine is on, and an `[egress]`
+//!   table holds the token minted for the machine's last boot. A marker records that Moon MCHN
+//!   owns a machine under that name. It outlives the daemon, so a restarted daemon finds the
+//!   machines an earlier one booted.
+//! - **The egress token map, in memory.** Loaded from the markers that are `on` when the daemon
+//!   starts, filled by `register` after a marker is written, and emptied by `retire` when a
+//!   machine's marker is removed. Each boot receives its token and the daemon's bound loopback
+//!   port.
 //! - **In-flight claims, in memory.** A map from a name to what an operation is doing to that
 //!   machine right now (`Starting` or `Stopping`). It dies with the daemon, so a crash can never
 //!   leave a name stuck as busy.
@@ -24,7 +26,8 @@
 //!   blocking thread pool through `spawn_blocking`, so a slow boot never stalls other requests.
 //! - One `Mutex` guards the in-flight map, and the flag that closes admission, for the whole
 //!   daemon. It is held for a single `get`, `insert` or `remove` at a time, never across an
-//!   `.await`. The only I/O under it is the directory read in `close`.
+//!   `.await`. The only I/O under it is in `close`, which reads the directory and each record
+//!   in it.
 //! - The claim, an entry in that map, is what serializes operations on one name. Operations on
 //!   different names run in parallel. `start`, `stop` and `resolve` on a claimed name fail at
 //!   once with `MachineBusy`, and `status` and `list` report the claim's state.
@@ -165,16 +168,31 @@ impl Drop for InFlight<'_> {
     }
 }
 
-/// The content of a machine's marker: what the daemon keeps for the machine's flows, and the
-/// spec it was booted with, its image pinned.
+/// Whether a machine is on, as the daemon records it in the marker: `On` from a boot until the
+/// engine confirms the stop, `Off` after. `daemon stop`, the decider's port and tokens, and
+/// sessions read it without asking the engine, whose own report is a [`machine::State`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Power {
+    /// Booted, with no stop confirmed since: the machine may be running.
+    On,
+    /// Stopped, as the engine confirmed: the machine does not run until its next start.
+    Off,
+}
+
+/// The content of a machine's marker: whether the machine is on, what the daemon keeps for its
+/// flows, and the spec it was booted with, its image pinned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Marker {
+    /// Whether the machine is on. The token in `egress` is the last boot's: the decider answers
+    /// for it only while this says `on`, since a confirmed stop retires it.
+    pub(super) power: Power,
     pub(super) egress: MarkerEgress,
     pub(super) spec: machine::Spec,
 }
 
-/// The marker's `[egress]` table: the token minted for that boot.
+/// The marker's `[egress]` table: the token minted for the machine's last boot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct MarkerEgress {
@@ -195,8 +213,9 @@ pub(super) struct Machines {
     ///
     /// One lock covers every name. Almost every use is a single hash operation (measured at 9
     /// to 40 ns) against about 20 µs for a whole request under load, so requests do not queue
-    /// on this lock. The exception is `close`, which reads the directory under it, once per
-    /// shutdown request. Shard it by name if profiling ever shows contention.
+    /// on this lock. The exception is `close`, which reads the directory and each record in it
+    /// under the lock, once per shutdown request. Shard it by name if profiling ever shows
+    /// contention.
     inflight: Mutex<Claims>,
 
     /// The lock on `daemon.pid` that `instance::claim` took, which keeps every other daemon out
@@ -351,6 +370,7 @@ impl Machines {
             let spec = pin::<E>(spec)?;
             let token = egress::Token::mint()?;
             let minted = Marker {
+                power: Power::On,
                 egress: MarkerEgress { token },
                 spec,
             };
@@ -482,8 +502,11 @@ impl Machines {
 
     /// Counts the machines, and closes admission when the shutdown may go ahead.
     ///
-    /// The count is the union of the names with a marker and the names in flight: a boot that
-    /// has not written its marker yet counts, and a name with both counts once.
+    /// The count is the union of the names in flight and the names whose record does not say
+    /// that the machine is stopped (`is_stopped_record`): a boot that has not written its
+    /// marker yet counts, a name with both counts once, and an empty or unreadable record
+    /// counts, since its machine may be running. A stopped machine runs nothing, so it does not
+    /// count.
     ///
     /// - `force`, or nothing to count: sets `closed`, so every later `claim` fails with
     ///   `DaemonStopping`. The caller shuts the daemon down.
@@ -496,9 +519,14 @@ impl Machines {
     pub(super) fn close(&self, force: bool) -> Result<usize> {
         let mut inflight = claims(&self.inflight);
 
-        // The directory read happens under the lock, so the count sees the same claims as the
-        // decision below. A `HashSet` counts a name with both a marker and a claim once.
-        let mut machines: HashSet<String> = self.names()?.into_iter().collect();
+        // The directory and its records are read under the lock, so the count sees the same
+        // claims as the decision below. A `HashSet` counts a name with both a record and a claim
+        // once.
+        let mut machines: HashSet<String> = self
+            .names()?
+            .into_iter()
+            .filter(|name| !is_stopped_record(&self.dir.join(name)))
+            .collect();
         machines.extend(inflight.names.keys().cloned());
         let count = machines.len();
 
@@ -606,8 +634,8 @@ impl Machines {
         Ok(outcomes)
     }
 
-    /// Resolves a machine's name: succeeds once a marker shows that Moon MCHN owns the machine
-    /// and no operation holds the name.
+    /// Resolves a machine's name: succeeds once a marker shows that Moon MCHN owns the machine,
+    /// its record does not say that it is stopped, and no operation holds the name.
     ///
     /// `resolve` consults claims and markers only, so a machine the engine cannot report still
     /// resolves, and the session that follows meets the engine's error.
@@ -616,7 +644,8 @@ impl Machines {
     ///
     /// Returns [`Error::InvalidMachineName`] when the name is invalid; [`Error::MachineBusy`]
     /// with the claim's state while a start or a stop holds the name; [`Error::MachineNotFound`]
-    /// when no marker exists; [`Error::Io`] when the marker cannot be checked.
+    /// when no marker exists; [`Error::MachineStopped`] when the record says `off`;
+    /// [`Error::Io`] when the marker cannot be checked.
     pub(super) fn resolve(&self, name: String) -> Result<()> {
         // Validate the name and build the marker path. An invalid name stops here, before it
         // touches the map or the filesystem.
@@ -630,11 +659,14 @@ impl Machines {
             return Err(Error::MachineBusy { name, state });
         }
 
-        // One `try_exists` on the runtime thread, like `status`'s read of a marker in flight.
-        // Nothing awaits since the claim check, so no other request can claim the name in
-        // between.
+        // One `try_exists` and one small read on the runtime thread, like `status`'s read of a
+        // marker in flight. Nothing awaits since the claim check, so no other request can claim
+        // the name in between.
         if !marker_exists(&marker)? {
             return Err(Error::MachineNotFound { name });
+        }
+        if is_stopped_record(&marker) {
+            return Err(Error::MachineStopped { name });
         }
 
         Ok(())
@@ -797,6 +829,7 @@ fn start_existing<E: Engine>(
             let spec = pin::<E>(spec)?;
             let token = egress::Token::mint()?;
             let minted = Marker {
+                power: Power::On,
                 egress: MarkerEgress { token },
                 spec,
             };
@@ -890,9 +923,10 @@ fn status_without_pid(name: String, state: State) -> machine::Status {
 ///   behind, because the temporary file is removed when it is dropped.
 /// - Creates the file with mode `0o600` (`MACHINE_RECORD_FILE_MODE`): readable and writable by
 ///   its owner only, like the private directory it sits in.
-/// - Nothing calls `sync_all`, so a power loss shortly after a write can leave the marker
-///   empty or missing. A crash of the daemon alone cannot, because the kernel already holds
-///   the data.
+/// - Flushes the temporary file with `sync_all` before the move, so the marker's name appears
+///   only over content already on disk, and a power loss cannot leave it empty. The directory
+///   is not flushed, so a power loss shortly after a write can still lose the marker. A crash
+///   of the daemon alone cannot, because the kernel already holds the data.
 fn write_marker(path: &Path, marker: &Marker) -> Result<()> {
     let contents = toml::to_string_pretty(marker).map_err(Error::ConfigSerialization)?;
 
@@ -908,6 +942,7 @@ fn write_marker(path: &Path, marker: &Marker) -> Result<()> {
         .map_err(|e| Error::io(path, e))?;
     file.write_all(contents.as_bytes())
         .map_err(|e| Error::io(path, e))?;
+    file.as_file().sync_all().map_err(|e| Error::io(path, e))?;
     file.persist_noclobber(path)
         .map_err(|e| Error::io(path, e.error))?;
 
@@ -920,12 +955,14 @@ fn write_marker(path: &Path, marker: &Marker) -> Result<()> {
 /// - A missing file reads as `None`, so a marker removed between a caller's existence check
 ///   and this read causes no error.
 /// - An empty file reads as `None` too, checked before parsing, which would fail on the
-///   missing fields. A power loss can leave a marker empty (see `write_marker`); its machine
-///   then still reports its state, with no spec.
+///   missing fields. `write_marker` flushes a marker before its name appears, so an empty one
+///   comes from elsewhere, such as a write by an earlier version cut short by a power loss, or
+///   a hand edit; its machine then still reports its state, with no spec.
 /// - A file that does not parse is an error (`ConfigDeserialization`), so a corrupt record is
 ///   never mistaken for a missing one. `Marker` denies unknown fields at every level, its
 ///   `[egress]` table and its spec's tables included, so a marker written by a Moon MCHN
-///   version with more fields fails to parse here as well.
+///   version with more fields fails to parse here as well. So does a marker without `power`,
+///   as v0.2.1 wrote it: the field is required.
 ///
 /// # Errors
 ///
@@ -948,6 +985,22 @@ pub(super) fn read_marker(path: &Path) -> Result<Option<Marker>> {
     })?;
 
     Ok(Some(marker))
+}
+
+/// Whether the record at `path` says that its machine is stopped: `true` only for a record
+/// that reads and holds `power = "off"`.
+///
+/// Every other record answers `false`, since its machine may be running: an empty one, one that
+/// does not parse, a record without `power` among them, and one that cannot be read. A missing
+/// record answers `false` too.
+pub(super) fn is_stopped_record(path: &Path) -> bool {
+    matches!(
+        read_marker(path),
+        Ok(Some(Marker {
+            power: Power::Off,
+            ..
+        }))
+    )
 }
 
 /// Removes a machine record file.
@@ -1103,11 +1156,27 @@ mod tests {
     use crate::daemon::{instance, state};
     use crate::image::Digest;
 
+    /// A stopped machine's marker, as `tests/machines.rs` writes one by hand: `power = "off"`
+    /// above the token `a` 64 times in `[egress]` and a spec with its image pinned.
+    const STOPPED_MARKER: &str = r#"power = "off"
+
+[egress]
+token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[spec.image]
+name = "ghcr.io/org/name:latest"
+digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[spec.resources]
+cpus = 1
+"#;
+
     #[test]
     fn a_marker_writes_its_egress_table_above_the_spec() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("alpha");
         let marker = Marker {
+            power: Power::On,
             egress: MarkerEgress {
                 token: egress::Token([0xaa; 32]),
             },
@@ -1123,10 +1192,11 @@ mod tests {
         write_marker(&path, &marker).unwrap();
         let text = fs::read_to_string(&path).unwrap();
 
-        // The token's table comes first, then the spec's, its image a table of its own.
+        // `power` comes first, then the token's table, then the spec's, its image a table of its
+        // own.
         assert!(
             text.starts_with(&format!(
-                "[egress]\ntoken = \"{}\"\n\n[spec]\n",
+                "power = \"on\"\n\n[egress]\ntoken = \"{}\"\n\n[spec]\n",
                 "a".repeat(64)
             )),
             "{text}"
@@ -1159,6 +1229,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("alpha");
         let marker = Marker {
+            power: Power::On,
             egress: MarkerEgress {
                 token: egress::Token([0xaa; 32]),
             },
@@ -1235,6 +1306,20 @@ mod tests {
         assert_eq!(machines.close(false).unwrap(), 2);
         // A refused shutdown leaves admission open.
         assert!(machines.claim("c", State::Starting).is_ok());
+    }
+
+    #[test]
+    fn close_counts_a_stopped_record_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let machines = registry(dir.path());
+        fs::write(machines.dir.join("a"), STOPPED_MARKER).unwrap();
+
+        // A stopped machine does not count, so the unforced close shuts admission.
+        assert_eq!(machines.close(false).unwrap(), 0);
+        assert!(matches!(
+            machines.claim("a", State::Starting),
+            Err(Error::DaemonStopping)
+        ));
     }
 
     #[test]

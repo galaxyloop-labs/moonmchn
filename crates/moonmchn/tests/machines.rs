@@ -30,9 +30,26 @@ use std::time::{Duration, SystemTime};
 mod common;
 use common::{daemon, daemon_with_teardown, daemon_with_thread};
 
-/// What a marker written by hand holds: a token in its `[egress]` table, then any valid spec,
-/// its image pinned, under `[spec]`.
-const MARKER: &str = r#"[egress]
+/// What a marker written by hand holds: `power = "on"`, a token in its `[egress]` table, then
+/// any valid spec, its image pinned, under `[spec]`.
+const MARKER: &str = r#"power = "on"
+
+[egress]
+token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[spec.image]
+name = "ghcr.io/org/name:latest"
+digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[spec.resources]
+cpus = 1
+"#;
+
+/// What a stopped machine's marker holds, written by hand: `MARKER`'s token and spec, below
+/// `power = "off"`.
+const STOPPED_MARKER: &str = r#"power = "off"
+
+[egress]
 token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [spec.image]
@@ -885,6 +902,17 @@ fn resolve_needs_no_engine() {
 }
 
 #[test]
+fn a_stopped_machine_refuses_a_session() {
+    let (dir, client) = daemon();
+    fs::write(common::marker(dir.path(), "alpha"), STOPPED_MARKER).unwrap();
+
+    assert_eq!(
+        error_message(client.machine_resolve("alpha")),
+        "machine alpha is stopped; run `mchn start alpha`"
+    );
+}
+
+#[test]
 fn records_survive_a_restart() {
     let dir = common::state_dir();
     // Written before the daemon starts: the new daemon learns of `alpha` from the disk alone.
@@ -1281,12 +1309,13 @@ fn write_marker(dir: &Path, name: &str) {
     fs::write(common::marker(dir, name), MARKER).unwrap();
 }
 
-/// What the marker of a machine booted with `spec` holds, written by hand: a fixed token in
-/// `[egress]`, above `spec` under `[spec]`.
+/// What the marker of a machine booted with `spec` holds, written by hand: `power = "on"`, a
+/// fixed token in `[egress]`, then `spec` under `[spec]`.
 fn marker_text(spec: &Spec) -> String {
     let mut egress = toml::Table::new();
     egress.insert("token".to_string(), "0123456789abcdef".repeat(4).into());
     let mut marker = toml::Table::new();
+    marker.insert("power".to_string(), "on".into());
     marker.insert("egress".to_string(), egress.into());
     marker.insert(
         "spec".to_string(),
