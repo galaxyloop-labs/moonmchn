@@ -153,9 +153,8 @@ impl Image {
     /// engine agree on which images are archives. A suffix that a later smolvm adds stays a
     /// registry reference until it is added here.
     ///
-    /// ponytail: Moon MCHN copies one engine's rule, as `REMOTE_SCHEMES` does for mounts. If a
-    /// second engine ever arrives, each engine answers for its own images through the `Engine`
-    /// trait.
+    /// ponytail: Moon MCHN copies one engine's rule. If a second engine ever arrives, each engine
+    /// answers for its own images through the `Engine` trait.
     ///
     /// # Examples
     ///

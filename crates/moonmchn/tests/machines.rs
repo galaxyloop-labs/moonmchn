@@ -559,24 +559,20 @@ fn start_rejects_a_relative_mount_source() {
     let list = client.machine_list().unwrap();
     assert!(list.is_empty(), "{list:?}");
 
-    // `http://` is none of the engine's remote schemes, so the engine would take this source
-    // for a relative host path.
-    let unknown_scheme = Spec {
-        mounts: vec![mount("http://host/x", "/data")],
+    // Moon MCHN mounts no remote source, and a URL is no absolute path.
+    let remote = Spec {
+        mounts: vec![mount("s3://bucket/prefix", "/models")],
         ..spec()
     };
     assert_eq!(
-        error_message(client.machine_start("alpha", unknown_scheme)),
-        r#"invalid mount source "http://host/x": a host directory must be an absolute path"#
+        error_message(client.machine_start("alpha", remote)),
+        r#"invalid mount source "s3://bucket/prefix": a host directory must be an absolute path"#
     );
 
-    // The rule's boundary: an absolute host directory and a remote volume both pass. The fake
-    // engine ignores the spec, so the start succeeds.
+    // The rule's boundary: an absolute host directory passes. The fake engine ignores the spec,
+    // so the start succeeds.
     let valid = Spec {
-        mounts: vec![
-            mount("/host/data", "/data"),
-            mount("s3://bucket/prefix", "/models"),
-        ],
+        mounts: vec![mount("/host/data", "/data")],
         ..spec()
     };
     assert_eq!(

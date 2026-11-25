@@ -110,17 +110,6 @@ const SCRIPT_FLAG: &str = "-c";
 /// ordinary exit status before the machine disappears.
 const HANG_UP: &str = "kill -s HUP -1";
 
-/// The mount source prefixes that the engine fetches as remote volumes. Every other source is
-/// a host directory.
-///
-/// The list mirrors `Mount::is_remote` in smolmachines 1.29.1 (`src/config.rs`), so the daemon
-/// and the engine agree on which sources are host paths. A scheme that a later smolmachines
-/// adds stays refused until it is added here.
-///
-/// ponytail: the daemon copies one engine's rule. If a second engine ever arrives, the check
-/// moves into the `Engine` trait, so each engine answers for its own sources.
-const REMOTE_SCHEMES: [&str; 4] = ["s3://", "gs://", "r2://", "rclone://"];
-
 /// The daemon's in-flight claims, and whether it still admits new ones.
 ///
 /// One `Mutex` guards both fields together, so `close` can count the claims and close
@@ -317,8 +306,8 @@ impl Machines {
     ///   satisfies the request.
     /// - `AlreadyRunning`: running or starting with a stored spec that satisfies the request,
     ///   so nothing changes. This makes `start` idempotent.
-    /// - Errors: `InvalidMachineName`; `InvalidMountSource` when a host mount source is a
-    ///   relative path; `MachineBusy` when another operation holds the name or the engine
+    /// - Errors: `InvalidMachineName`; `InvalidMountSource` when a mount source is not an
+    ///   absolute path; `MachineBusy` when another operation holds the name or the engine
     ///   reports the machine stopping; `MachineConfigMismatch` when it runs, or is paused, with
     ///   a stored spec that does not satisfy the request; `MachineUnknown` when the engine
     ///   cannot report it; `ImageResolve` when the engine cannot resolve the image's digest;
@@ -1100,24 +1089,20 @@ fn is_name_char(c: char) -> bool {
 
 /// Validates the mount sources of a machine spec.
 ///
-/// A source that starts with one of `REMOTE_SCHEMES`, such as `s3://bucket/prefix`, is a
-/// remote volume and passes untouched. Every other source is a host directory, a URL with any
-/// other scheme such as `http://host/x` included, and must be an absolute path. The engine
-/// resolves a relative path against the daemon's working directory: wherever `daemon start`
-/// ran, a directory the user starting the machine never chose. A relative source could then
-/// fail for no visible reason, or expose an unrelated directory to the guest, writable by
-/// default.
+/// Every source is a host directory and must be an absolute path. Moon MCHN mounts no remote
+/// source, and a URL such as `s3://bucket/prefix` is no absolute path, so it is refused too.
+/// The engine resolves a relative path against the daemon's working directory: wherever
+/// `daemon start` ran, a directory the user starting the machine never chose. A relative
+/// source could then fail for no visible reason, or expose an unrelated directory to the
+/// guest, writable by default.
 ///
 /// # Errors
 ///
-/// - [`Error::InvalidMountSource`] for the first host source that is a relative path.
+/// - [`Error::InvalidMountSource`] for the first source that is not an absolute path.
 fn validate_mounts(spec: &machine::Spec) -> Result<()> {
     for mount in &spec.mounts {
-        let remote = REMOTE_SCHEMES
-            .iter()
-            .any(|scheme| mount.source.starts_with(scheme));
         // On Unix, a path is absolute when it starts with `/`.
-        if !remote && !Path::new(&mount.source).is_absolute() {
+        if !Path::new(&mount.source).is_absolute() {
             return Err(Error::InvalidMountSource {
                 path: mount.source.clone(),
             });

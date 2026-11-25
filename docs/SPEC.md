@@ -140,12 +140,11 @@ deny = []
 ```
 
 To configure mounts, replace the top-level `mounts = []` with `[[mounts]]`
-sections containing `source`, `target`, and `read_only`. Host mounts are
-local-only; a source starting with `s3://`, `gs://`, `r2://` or `rclone://`
-denotes a remote volume.
-Every other source is a host directory and must be an absolute path:
-`mchn start` rejects a relative one, because the engine would resolve it
-against the daemon's working directory, wherever `daemon start` ran.
+sections containing `source`, `target`, and `read_only`. Every source is a host
+directory and must be an absolute path: `mchn start` rejects a relative one,
+because the engine would resolve it against the daemon's working directory,
+wherever `daemon start` ran. Moon MCHN mounts no remote source, and a URL such
+as `s3://bucket/prefix` is no absolute path, so `mchn start` rejects it too.
 A host mount is a live view of that directory, so the guest reads the host's
 own files, and writes them unless the mount is `read_only`.
 

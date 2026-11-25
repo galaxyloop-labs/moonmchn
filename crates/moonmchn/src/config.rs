@@ -261,7 +261,7 @@ mod tests {
                     read_only: false,
                 },
                 Mount {
-                    source: "s3://bucket/models".into(),
+                    source: "/host/models".into(),
                     target: "/models".into(),
                     read_only: true,
                 },
@@ -294,7 +294,7 @@ target = "/workspace"
 read_only = false
 
 [[mounts]]
-source = "s3://bucket/models"
+source = "/host/models"
 target = "/models"
 read_only = true
 

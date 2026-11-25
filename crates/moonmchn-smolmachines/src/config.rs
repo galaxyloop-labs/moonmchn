@@ -134,7 +134,7 @@ mod tests {
                     read_only: false,
                 },
                 Mount {
-                    source: "s3://bucket/models".into(),
+                    source: "/host/models".into(),
                     target: "/models".into(),
                     read_only: true,
                 },
@@ -162,7 +162,7 @@ mod tests {
             machine.mounts,
             [
                 smolmachines::Mount::new("/host/path with spaces", "/workspace"),
-                smolmachines::Mount::new("s3://bucket/models", "/models").read_only(),
+                smolmachines::Mount::new("/host/models", "/models").read_only(),
             ]
         );
         assert_eq!(
