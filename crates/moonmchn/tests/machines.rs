@@ -30,9 +30,26 @@ use std::time::{Duration, SystemTime};
 mod common;
 use common::{daemon, daemon_with_teardown, daemon_with_thread};
 
-/// What a marker written by hand holds: a token in its `[egress]` table, then any valid spec,
-/// its image pinned, under `[spec]`.
-const MARKER: &str = r#"[egress]
+/// What a marker written by hand holds: `power = "on"`, a token in its `[egress]` table, then
+/// any valid spec, its image pinned, under `[spec]`.
+const MARKER: &str = r#"power = "on"
+
+[egress]
+token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[spec.image]
+name = "ghcr.io/org/name:latest"
+digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[spec.resources]
+cpus = 1
+"#;
+
+/// What a stopped machine's marker holds, written by hand: `MARKER`'s token and spec, below
+/// `power = "off"`.
+const STOPPED_MARKER: &str = r#"power = "off"
+
+[egress]
 token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [spec.image]
@@ -542,24 +559,20 @@ fn start_rejects_a_relative_mount_source() {
     let list = client.machine_list().unwrap();
     assert!(list.is_empty(), "{list:?}");
 
-    // `http://` is none of the engine's remote schemes, so the engine would take this source
-    // for a relative host path.
-    let unknown_scheme = Spec {
-        mounts: vec![mount("http://host/x", "/data")],
+    // Moon MCHN mounts no remote source, and a URL is no absolute path.
+    let remote = Spec {
+        mounts: vec![mount("s3://bucket/prefix", "/models")],
         ..spec()
     };
     assert_eq!(
-        error_message(client.machine_start("alpha", unknown_scheme)),
-        r#"invalid mount source "http://host/x": a host directory must be an absolute path"#
+        error_message(client.machine_start("alpha", remote)),
+        r#"invalid mount source "s3://bucket/prefix": a host directory must be an absolute path"#
     );
 
-    // The rule's boundary: an absolute host directory and a remote volume both pass. The fake
-    // engine ignores the spec, so the start succeeds.
+    // The rule's boundary: an absolute host directory passes. The fake engine ignores the spec,
+    // so the start succeeds.
     let valid = Spec {
-        mounts: vec![
-            mount("/host/data", "/data"),
-            mount("s3://bucket/prefix", "/models"),
-        ],
+        mounts: vec![mount("/host/data", "/data")],
         ..spec()
     };
     assert_eq!(
@@ -680,7 +693,7 @@ fn a_failed_stop_keeps_the_record() {
 #[test]
 fn stopping_a_machine_the_engine_lost_cleans_up() {
     let (dir, client) = daemon();
-    // The fake's engine has lost `ghost`: its `stop` fails with `MachineNotFound`.
+    // The fake's engine has lost `ghost`: its `delete` fails with `MachineNotFound`.
     write_marker(dir.path(), "ghost");
 
     let stopped = client.machine_stop("ghost").unwrap();
@@ -698,6 +711,18 @@ fn stop_announces_before_destroying() {
 
     assert_eq!(stopped, MachineStop::Stopped);
     common::assert_announced("announced", "mchn machine stop announced");
+}
+
+#[test]
+fn stop_asks_the_engine_to_delete() {
+    let (_dir, client) = daemon();
+    client.machine_start("gone", spec()).unwrap();
+
+    client.machine_stop("gone").unwrap();
+
+    // A `destroy` that called the trait's `stop` would compile too, and keep the engine's
+    // machine while its record goes.
+    assert_eq!(common::calls("gone"), ["start", "delete"]);
 }
 
 #[test]
@@ -882,6 +907,17 @@ fn resolve_needs_no_engine() {
     write_marker(dir.path(), "flaky");
 
     client.machine_resolve("flaky").unwrap();
+}
+
+#[test]
+fn a_stopped_machine_refuses_a_session() {
+    let (dir, client) = daemon();
+    fs::write(common::marker(dir.path(), "alpha"), STOPPED_MARKER).unwrap();
+
+    assert_eq!(
+        error_message(client.machine_resolve("alpha")),
+        "machine alpha is stopped; run `mchn start alpha`"
+    );
 }
 
 #[test]
@@ -1281,12 +1317,13 @@ fn write_marker(dir: &Path, name: &str) {
     fs::write(common::marker(dir, name), MARKER).unwrap();
 }
 
-/// What the marker of a machine booted with `spec` holds, written by hand: a fixed token in
-/// `[egress]`, above `spec` under `[spec]`.
+/// What the marker of a machine booted with `spec` holds, written by hand: `power = "on"`, a
+/// fixed token in `[egress]`, then `spec` under `[spec]`.
 fn marker_text(spec: &Spec) -> String {
     let mut egress = toml::Table::new();
     egress.insert("token".to_string(), "0123456789abcdef".repeat(4).into());
     let mut marker = toml::Table::new();
+    marker.insert("power".to_string(), "on".into());
     marker.insert("egress".to_string(), egress.into());
     marker.insert(
         "spec".to_string(),

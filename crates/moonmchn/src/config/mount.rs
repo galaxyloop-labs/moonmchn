@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-/// A host directory or remote volume exposed inside the guest.
+/// A host directory exposed inside the guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mount {
-    /// Host directory or remote URL, such as `s3://bucket/prefix`.
+    /// Host directory, as an absolute path: `mchn start` refuses any other source.
     pub source: String,
     /// Absolute path inside the guest.
     pub target: String,

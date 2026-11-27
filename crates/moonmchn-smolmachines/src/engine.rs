@@ -1,7 +1,7 @@
 //! Moon MCHN's machine traits, implemented with smolmachines.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,7 +10,7 @@ use smolmachines::{ErrorKind, Machine as SdkMachine, MachineState};
 use moonmchn::config::EgressEndpoint;
 use moonmchn::image::{Digest, Image};
 use moonmchn::machine::{self, State, Status};
-use moonmchn::{Error, Result};
+use moonmchn::{ByteSize, Error, Result};
 
 use crate::gateway::Gateway;
 use crate::machine_config;
@@ -70,6 +70,86 @@ const DOCKER_CONFIG_ENV: &str = "DOCKER_CONFIG";
 /// `config.json`, so the engine finds no login there.
 const NO_DOCKER_LOGINS: &str = "/dev/null";
 
+/// The `machine` subcommand that moves a stopped machine to new mounts and resources.
+const UPDATE: &str = "update";
+
+/// The `machine` subcommand that reports one machine; with `JSON_FLAG`, as a JSON object that
+/// holds the sizes of its disks.
+const STATUS: &str = "status";
+
+/// Makes `machine status` answer as JSON.
+const JSON_FLAG: &str = "--json";
+
+/// Takes a mount away from a stopped machine, written as `VOLUME_FLAG` adds it. The engine
+/// accepts the removal of a mount it does not hold.
+const REMOVE_VOLUME_FLAG: &str = "--remove-volume";
+
+/// Adds a mount to a stopped machine: `HOST:GUEST`, or `HOST:GUEST:ro` when read-only, as the
+/// SDK's `create` writes it.
+const VOLUME_FLAG: &str = "--volume";
+
+/// Separates a mount's host path from its guest path: `HOST:GUEST`.
+const MOUNT_SEPARATOR: char = ':';
+
+/// Ends a read-only mount: `HOST:GUEST:ro`.
+const READ_ONLY_SUFFIX: &str = ":ro";
+
+/// Sets a stopped machine's CPUs.
+const CPUS_FLAG: &str = "--cpus";
+
+/// Sets a stopped machine's memory, in MiB.
+const MEMORY_FLAG: &str = "--mem";
+
+/// Gives a stopped machine a GPU.
+const GPU_FLAG: &str = "--gpu";
+
+/// Takes a stopped machine's GPU away.
+const NO_GPU_FLAG: &str = "--no-gpu";
+
+/// Grows a stopped machine's storage disk to the size that follows, in GiB. The engine refuses
+/// a size below the one it holds, and with it the whole call.
+const STORAGE_FLAG: &str = "--storage";
+
+/// Grows a stopped machine's overlay disk to the size that follows, in GiB, and is refused
+/// below the size the engine holds, as `STORAGE_FLAG` is.
+const OVERLAY_FLAG: &str = "--overlay";
+
+/// The CPU count of a machine created without one.
+///
+/// shortcut: smolvm 1.32.4's default, from `smolvm machine create --help`, recheck on every
+/// `smolmachines` bump.
+const DEFAULT_CPUS: u8 = 4;
+
+/// The memory of a machine created without a size, in MiB.
+///
+/// shortcut: smolvm 1.32.4's default, from `smolvm machine create --help`, recheck on every
+/// `smolmachines` bump.
+const DEFAULT_MEMORY: u32 = 8192;
+
+/// The size of a storage disk created without one: the engine reports it as `null`.
+///
+/// shortcut: smolvm 1.32.4's default, recheck on every `smolmachines` bump.
+const DEFAULT_STORAGE_SIZE: ByteSize =
+    ByteSize::checked_from_gib(20).expect("20 GiB fits in a u64 byte count");
+
+/// The size of an overlay disk created without one: the engine reports it as `null`.
+///
+/// shortcut: smolvm 1.32.4's default, recheck on every `smolmachines` bump.
+const DEFAULT_OVERLAY_SIZE: ByteSize =
+    ByteSize::checked_from_gib(10).expect("10 GiB fits in a u64 byte count");
+
+/// The file of a machine's storage disk, in its data directory.
+///
+/// shortcut: smolvm 1.32.4's name, from its `src/data/storage.rs`, rechecked on every
+/// `smolmachines` bump.
+const STORAGE_DISK_FILE: &str = "storage.raw";
+
+/// The file of a machine's overlay disk, in its data directory.
+///
+/// shortcut: smolvm 1.32.4's name, from its `src/data/storage.rs`, rechecked on every
+/// `smolmachines` bump.
+const OVERLAY_DISK_FILE: &str = "overlay.raw";
+
 /// Hides the host's `docker login` credentials from the engine commands that `command`'s
 /// process runs. Left alone, `machine create` probes a registry image with them and
 /// `machine start` pulls it with them. `mchn daemon start` applies this to the daemon, so
@@ -93,6 +173,14 @@ impl machine::Engine for Engine {
 /// Moon MCHN machine implementation for smolmachines.
 pub struct Machine(SdkMachine);
 
+impl Machine {
+    /// Returns the underlying smolmachines machine.
+    #[must_use]
+    fn sdk(&self) -> &SdkMachine {
+        &self.0
+    }
+}
+
 impl machine::Machine for Machine {
     fn start(name: &str, spec: machine::Spec, egress: &EgressEndpoint) -> Result<Self> {
         let machine =
@@ -104,6 +192,44 @@ impl machine::Machine for Machine {
         }
     }
 
+    fn update(&self, from: &machine::Spec, to: &machine::Spec) -> Result<()> {
+        let engine_cli = smolmachines::engine_cli().map_err(|error| engine_error(&error))?;
+        let name = self.sdk().name();
+        let status = run_engine(
+            &engine_cli,
+            &[
+                MACHINE.to_string(),
+                STATUS.to_string(),
+                NAME_FLAG.to_string(),
+                name.to_string(),
+                JSON_FLAG.to_string(),
+            ],
+        )?;
+        let held = engine_disks(&status)?;
+
+        // One update applies all changes together; a failed status read changes nothing.
+        run_engine(&engine_cli, &update_args(name, from, to, held)).map(|_| ())
+    }
+
+    fn power_on(&self, egress: &EgressEndpoint) -> Result<()> {
+        let name = self.sdk().name();
+        let data_dir = self
+            .sdk()
+            .data_dir()
+            .map_err(|error| engine_error(&error))?;
+        if !has_disks(&data_dir) {
+            return Err(Error::Engine {
+                message: format!(
+                    "the disk of machine {name} is gone from {}; run `mchn delete {name}`",
+                    data_dir.display()
+                ),
+            });
+        }
+
+        // Unlike a failed `start`, a failed boot must keep the machine and its disks.
+        start_mediated(name, egress).map_err(|error| engine_error(&error))
+    }
+
     fn attach(name: &str) -> Result<Self> {
         SdkMachine::attach(name)
             .map(Self)
@@ -111,9 +237,9 @@ impl machine::Machine for Machine {
     }
 
     fn status(&self) -> Result<Status> {
-        let name = self.0.name().to_string();
-        let state = state(self.0.state());
-        let pid = self.0.pid().and_then(|pid| u32::try_from(pid).ok());
+        let name = self.sdk().name().to_string();
+        let state = state(self.sdk().state());
+        let pid = pid_of(state, self.sdk().pid());
 
         Ok(Status { name, state, pid })
     }
@@ -122,7 +248,7 @@ impl machine::Machine for Machine {
         // `machine resume` takes no interceptor, so the engine refuses to resume a machine
         // `start` booted: "mediated egress: this machine requires an external interceptor on
         // every start". The daemon passes that error on.
-        self.0.resume().map_err(|error| engine_error(&error))
+        self.sdk().resume().map_err(|error| engine_error(&error))
     }
 
     fn exec(&self, command: &[String], timeout: Duration) -> Result<i32> {
@@ -130,23 +256,21 @@ impl machine::Machine for Machine {
 
         exec_discarding_output(
             &engine_cli,
-            &exec_args(self.0.name(), command, timeout),
+            &exec_args(self.sdk().name(), command, timeout),
             timeout,
         )
     }
 
-    fn stop(self) -> Result<()> {
-        match self.0.delete() {
-            Ok(()) => Ok(()),
-            // Only the engine naming this machine as missing confirms that it is gone. Every
-            // other error, a damaged engine install included, takes the last arm and becomes
-            // an engine error, so the daemon keeps the machine's marker.
-            Err(error) if confirms_absence(self.0.name(), error.message()) => {
-                let name = self.0.name().to_string();
-                Err(Error::MachineNotFound { name })
-            }
-            Err(error) => Err(engine_error(&error)),
-        }
+    fn stop(&self) -> Result<()> {
+        self.sdk()
+            .stop()
+            .map_err(|error| absence_or_engine_error(self.sdk().name(), &error))
+    }
+
+    fn delete(self) -> Result<()> {
+        self.sdk()
+            .delete()
+            .map_err(|error| absence_or_engine_error(self.sdk().name(), &error))
     }
 }
 
@@ -184,6 +308,20 @@ fn state(machine_state: MachineState) -> State {
 pub(crate) fn engine_error(error: &smolmachines::Error) -> Error {
     Error::Engine {
         message: error.to_string(),
+    }
+}
+
+/// Maps the SDK's `error` from a call on the machine `name`. Only the engine naming that
+/// machine as missing confirms that it is gone, and gives `MachineNotFound`. Every other error,
+/// a damaged engine install included, becomes `Error::Engine`: the machine may still exist, so
+/// the daemon keeps its marker.
+fn absence_or_engine_error(name: &str, error: &smolmachines::Error) -> Error {
+    if confirms_absence(name, error.message()) {
+        Error::MachineNotFound {
+            name: name.to_string(),
+        }
+    } else {
+        engine_error(error)
     }
 }
 
@@ -234,22 +372,9 @@ fn start_mediated(name: &str, binding: &EgressEndpoint) -> smolmachines::Result<
         return Ok(());
     }
 
-    // Match the SDK's cli_error: prefer stderr, falling back to stdout when it is empty.
-    let message = String::from_utf8_lossy(if output.stderr.is_empty() {
-        &output.stdout
-    } else {
-        &output.stderr
-    })
-    .trim()
-    .to_string();
-
     Err(smolmachines::Error::new(
         ErrorKind::Other,
-        if message.is_empty() {
-            format!("smolvm {} failed", args.join(" "))
-        } else {
-            message
-        },
+        failure_text(&args, &output),
     ))
 }
 
@@ -280,6 +405,182 @@ fn mediated_start_args(name: &str, binding: &EgressEndpoint) -> Vec<String> {
         binding.address.to_string(),
         MEDIATED_EGRESS_FLAG.to_string(),
     ]
+}
+
+/// Runs an engine command, returning its stdout on success and the engine's text on failure, as
+/// `failure_text` picks it. Like the SDK, it closes stdin and removes the variable tying a VM to
+/// its booting process.
+fn run_engine(engine_cli: &Path, args: &[String]) -> Result<String> {
+    let output = Command::new(engine_cli)
+        .args(args)
+        .env_remove(BOOT_BINARY_ENV)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| Error::Engine {
+            message: format!("run {}: {error}", engine_cli.display()),
+        })?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+
+    Err(Error::Engine {
+        message: failure_text(args, &output),
+    })
+}
+
+/// Returns what the engine said about its failed command `args`, from the command's `output`,
+/// picked as the SDK's `cli_error` picks it: stderr, or stdout when stderr is empty, or a line
+/// naming the command when both are.
+#[must_use]
+fn failure_text(args: &[String], output: &Output) -> String {
+    let text = String::from_utf8_lossy(if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    })
+    .trim()
+    .to_string();
+
+    if text.is_empty() {
+        format!("smolvm {} failed", args.join(" "))
+    } else {
+        text
+    }
+}
+
+/// The sizes of a machine's disks, as the engine holds them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Disks {
+    /// The size of the storage disk.
+    storage: ByteSize,
+    /// The size of the overlay disk.
+    overlay: ByteSize,
+}
+
+/// Returns the engine's `machine update` arguments that move the stopped machine `name` from
+/// `from`'s settings to `to`'s, `held` being the disks the engine holds.
+///
+/// - Every mount of `from` is removed first, in `from`'s order, then every mount of `to` is
+///   added, in `to`'s order. The engine applies the removals before the additions, so a mount
+///   in both specs is taken away and added back.
+/// - Then the resources. `--cpus` and `--mem` when `to` sets them, and with the engine's
+///   default when `to` drops one that `from` set: the engine keeps a value the call leaves
+///   out, and a new machine from `to` would get the default. `--gpu` or `--no-gpu` when the
+///   GPU setting changed. `--storage` or `--overlay` only when `to` asks for a larger disk
+///   than `held`: the engine refuses a smaller disk, and with it the whole call.
+#[must_use]
+fn update_args(name: &str, from: &machine::Spec, to: &machine::Spec, held: Disks) -> Vec<String> {
+    let mut args = vec![
+        MACHINE.to_string(),
+        UPDATE.to_string(),
+        NAME_FLAG.to_string(),
+        name.to_string(),
+    ];
+
+    for (flag, mounts) in [
+        (REMOVE_VOLUME_FLAG, &from.mounts),
+        (VOLUME_FLAG, &to.mounts),
+    ] {
+        for mount in mounts {
+            let suffix = if mount.read_only {
+                READ_ONLY_SUFFIX
+            } else {
+                ""
+            };
+            args.push(flag.to_string());
+            args.push(format!(
+                "{}{MOUNT_SEPARATOR}{}{suffix}",
+                mount.source, mount.target
+            ));
+        }
+    }
+
+    let cpus = match (from.resources.cpus, to.resources.cpus) {
+        (Some(_), None) => Some(DEFAULT_CPUS),
+        (_, cpus) => cpus,
+    };
+    if let Some(cpus) = cpus {
+        args.extend([CPUS_FLAG.to_string(), cpus.to_string()]);
+    }
+    let memory = match (from.resources.memory, to.resources.memory) {
+        (Some(_), None) => Some(DEFAULT_MEMORY),
+        (_, memory) => memory,
+    };
+    if let Some(memory) = memory {
+        args.extend([MEMORY_FLAG.to_string(), memory.to_string()]);
+    }
+
+    let gpu = to.resources.gpu.unwrap_or(false);
+    if from.resources.gpu.unwrap_or(false) != gpu {
+        args.push(if gpu { GPU_FLAG } else { NO_GPU_FLAG }.to_string());
+    }
+
+    for (flag, requested, current) in [
+        (STORAGE_FLAG, to.resources.storage, held.storage),
+        (OVERLAY_FLAG, to.resources.overlay, held.overlay),
+    ] {
+        if let Some(size) = requested.filter(|size| *size > current.as_gib()) {
+            args.extend([flag.to_string(), size.to_string()]);
+        }
+    }
+
+    args
+}
+
+/// Reads the sizes of a machine's disks from the engine's `machine status --json` answer: its
+/// `storage_gb` and `overlay_gb`, in GiB. A `null` size is one the machine was created without,
+/// so the engine holds its default: `DEFAULT_STORAGE_SIZE` or `DEFAULT_OVERLAY_SIZE`.
+///
+/// # Errors
+///
+/// Returns `Error::Engine` when the answer does not parse, or when a size overflows a
+/// `ByteSize`.
+fn engine_disks(status_json: &str) -> Result<Disks> {
+    let status: serde_json::Value =
+        serde_json::from_str(status_json).map_err(|error| Error::Engine {
+            message: format!("read machine status: {error}"),
+        })?;
+    let size = |key: &str, default| {
+        let value = status.get(key).ok_or_else(|| Error::Engine {
+            message: format!("machine status has no {key}"),
+        })?;
+        if value.is_null() {
+            return Ok(default);
+        }
+        let gib = value.as_u64().ok_or_else(|| Error::Engine {
+            message: format!("machine status has invalid {key}: {value}"),
+        })?;
+        ByteSize::checked_from_gib(gib).ok_or_else(|| Error::Engine {
+            message: format!("machine status {key} of {gib} GiB overflows a byte count"),
+        })
+    };
+
+    Ok(Disks {
+        storage: size("storage_gb", DEFAULT_STORAGE_SIZE)?,
+        overlay: size("overlay_gb", DEFAULT_OVERLAY_SIZE)?,
+    })
+}
+
+/// Returns the pid to report for a machine the engine reports in `state` with `pid`: only a
+/// running machine has a process. After a `kill -9` the engine reports the machine `stopped`
+/// with the dead pid still set.
+#[must_use]
+fn pid_of(state: State, pid: Option<i32>) -> Option<u32> {
+    if state == State::Running {
+        return pid.and_then(|pid| u32::try_from(pid).ok());
+    }
+
+    None
+}
+
+/// Returns whether a machine's data directory, `data_dir`, holds both of its disk files,
+/// `STORAGE_DISK_FILE` and `OVERLAY_DISK_FILE`. With either one gone, `smolvm machine start`
+/// makes a new disk and boots the machine empty, so `power_on` refuses the machine as one whose
+/// disk is lost.
+#[must_use]
+fn has_disks(data_dir: &Path) -> bool {
+    data_dir.join(STORAGE_DISK_FILE).is_file() && data_dir.join(OVERLAY_DISK_FILE).is_file()
 }
 
 /// Returns the engine client's `machine exec` arguments that run `command` in machine `name`
@@ -384,7 +685,9 @@ fn exec_discarding_output(engine_cli: &Path, args: &[String], timeout: Duration)
 mod tests {
     use super::*;
 
+    use moonmchn::config::{Mount, Resources};
     use std::assert_matches;
+    use std::fs;
 
     #[test]
     fn mediated_start_arguments_are_exact() {
@@ -407,6 +710,180 @@ mod tests {
                 "--mediated-egress",
             ]
         );
+    }
+
+    #[test]
+    fn update_arguments_are_exact() {
+        let from = machine::Spec {
+            mounts: vec![mount_at("/host/a", "/mnt/a", false)],
+            resources: Resources {
+                cpus: Some(2),
+                memory: Some(1024),
+                ..Resources::default()
+            },
+            ..machine::Spec::default()
+        };
+        let to = machine::Spec {
+            mounts: vec![mount_at("/host/b", "/mnt/b", true)],
+            resources: Resources {
+                cpus: Some(4),
+                memory: Some(2048),
+                gpu: Some(true),
+                storage: Some(40),
+                overlay: Some(20),
+                ..Resources::default()
+            },
+            ..machine::Spec::default()
+        };
+        let held = disks(30, 10);
+
+        assert_eq!(
+            update_args("alpha", &from, &to, held),
+            [
+                "machine",
+                "update",
+                "--name",
+                "alpha",
+                "--remove-volume",
+                "/host/a:/mnt/a",
+                "--volume",
+                "/host/b:/mnt/b:ro",
+                "--cpus",
+                "4",
+                "--mem",
+                "2048",
+                "--gpu",
+                "--storage",
+                "40",
+                "--overlay",
+                "20",
+            ]
+        );
+    }
+
+    #[test]
+    fn update_never_asks_for_a_smaller_disk() {
+        // The engine holds 30 GiB. `to` asking for 20, more than `from`'s 10, for as much as the
+        // engine holds, or for no size at all grows nothing.
+        let held = disks(30, 10);
+        let from = machine::Spec {
+            resources: Resources {
+                storage: Some(10),
+                ..Resources::default()
+            },
+            ..machine::Spec::default()
+        };
+
+        for storage in [Some(20), Some(30), None] {
+            let to = machine::Spec {
+                resources: Resources {
+                    storage,
+                    ..Resources::default()
+                },
+                ..machine::Spec::default()
+            };
+
+            assert_eq!(
+                update_args("alpha", &from, &to, held),
+                ["machine", "update", "--name", "alpha"],
+                "{storage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_turns_the_gpu_off_only_when_it_changed() {
+        // `from`'s GPU, `to`'s, and the flag that goes out. A GPU never set is off, as one set
+        // to `false` is.
+        let cases = [
+            (Some(true), None, Some("--no-gpu")),
+            (Some(true), Some(false), Some("--no-gpu")),
+            (Some(true), Some(true), None),
+            (Some(false), None, None),
+        ];
+        let held = disks(30, 10);
+        let with_gpu = |gpu| machine::Spec {
+            resources: Resources {
+                gpu,
+                ..Resources::default()
+            },
+            ..machine::Spec::default()
+        };
+
+        for (from, to, flag) in cases {
+            let mut expected = vec!["machine", "update", "--name", "alpha"];
+            expected.extend(flag);
+
+            assert_eq!(
+                update_args("alpha", &with_gpu(from), &with_gpu(to), held),
+                expected,
+                "{from:?} to {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_resets_dropped_cpus_and_memory_to_the_engines_default() {
+        // `from` sets both and `to` neither, as when the lines leave `config.toml`. A machine
+        // created from `to` gets the engine's 4 CPUs and 8192 MiB, so this one goes back to them.
+        let from = machine::Spec {
+            resources: Resources {
+                cpus: Some(2),
+                memory: Some(2048),
+                ..Resources::default()
+            },
+            ..machine::Spec::default()
+        };
+        let to = machine::Spec::default();
+
+        assert_eq!(
+            update_args("alpha", &from, &to, disks(30, 10)),
+            [
+                "machine", "update", "--name", "alpha", "--cpus", "4", "--mem", "8192"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_null_size_reads_as_the_engines_default() {
+        // The engine writes `null` for a size the machine was created without, and holds its
+        // default: 20 GiB of storage, 10 of overlay.
+        assert_eq!(
+            engine_disks(r#"{"storage_gb":null,"overlay_gb":25}"#).unwrap(),
+            disks(20, 25)
+        );
+        assert_eq!(
+            engine_disks(r#"{"storage_gb":30,"overlay_gb":null}"#).unwrap(),
+            disks(30, 10)
+        );
+    }
+
+    #[test]
+    fn only_a_running_machine_reports_a_pid() {
+        // After a `kill -9` the engine reports the machine stopped, its dead pid still set.
+        assert_eq!(pid_of(State::Stopped, Some(4242)), None);
+        assert_eq!(pid_of(State::Running, Some(4242)), Some(4242));
+    }
+
+    #[test]
+    fn a_missing_disk_file_reads_as_a_lost_disk() {
+        let both = tempfile::tempdir().unwrap();
+        for file in ["storage.raw", "overlay.raw"] {
+            fs::write(both.path().join(file), b"").unwrap();
+        }
+        assert!(has_disks(both.path()));
+
+        // Either file alone: with the other one gone, the engine would make a new disk and boot
+        // the machine empty.
+        for kept in ["storage.raw", "overlay.raw"] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join(kept), b"").unwrap();
+
+            assert!(!has_disks(dir.path()), "{kept} alone");
+        }
+
+        // No directory at all, as for a machine created and never booted.
+        assert!(!has_disks(&both.path().join("missing")));
     }
 
     #[test]
@@ -573,5 +1050,22 @@ mod tests {
         let docker_config = command.get_envs().find(|(key, _)| *key == "DOCKER_CONFIG");
 
         assert_matches!(docker_config, Some((_, Some(value))) if value == "/dev/null");
+    }
+
+    /// A mount of `source` at `target`, read-only when `read_only` says so.
+    fn mount_at(source: &str, target: &str, read_only: bool) -> Mount {
+        Mount {
+            source: source.to_string(),
+            target: target.to_string(),
+            read_only,
+        }
+    }
+
+    /// Disks of `storage` and `overlay` GiB.
+    fn disks(storage: u64, overlay: u64) -> Disks {
+        Disks {
+            storage: ByteSize::checked_from_gib(storage).unwrap(),
+            overlay: ByteSize::checked_from_gib(overlay).unwrap(),
+        }
     }
 }

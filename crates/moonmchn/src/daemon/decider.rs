@@ -609,7 +609,7 @@ mod tests {
     use super::*;
     use crate::config::Pattern;
     use crate::daemon::egress::Token;
-    use crate::daemon::machines::{Marker, MarkerEgress};
+    use crate::daemon::machines::{Marker, MarkerEgress, Power};
     use crate::machine::Spec;
     use std::cell::Cell;
     use std::net::Ipv6Addr;
@@ -1249,6 +1249,7 @@ mod tests {
         state.register(
             "beta",
             &Marker {
+                power: Power::On,
                 egress: MarkerEgress {
                     token: Token([0xcc; 32]),
                 },
@@ -1365,6 +1366,7 @@ mod tests {
         state.register(
             "alpha",
             &Marker {
+                power: Power::On,
                 egress: MarkerEgress {
                     token: Token([0xaa; 32]),
                 },

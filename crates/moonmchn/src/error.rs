@@ -119,6 +119,13 @@ pub enum Error {
         /// The machine's name.
         name: String,
     },
+    /// The machine is stopped, as its record says, so it takes no session until it starts
+    /// again.
+    #[error("machine {name} is stopped; run `mchn start {name}`")]
+    MachineStopped {
+        /// The machine's name.
+        name: String,
+    },
     /// The engine reported a failure.
     #[error("the engine failed: {message}")]
     Engine {

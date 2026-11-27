@@ -1,8 +1,8 @@
 //! The daemon's egress listener and the tokens its machines' gateways present.
 //!
-//! `<state>/egress/port` holds the listener's port. Tokens and their policies are loaded from
-//! the machine markers at startup, registered after a marker is written, and retired when its
-//! machine is removed. The token map lives only in memory.
+//! `<state>/egress/port` holds the listener's port. Tokens and their policies are loaded at
+//! startup from the markers that are `on`, registered after a marker is written, and retired
+//! when its machine is removed. The token map lives only in memory.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,7 +15,9 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::config::{Egress, EgressEndpoint};
-use crate::daemon::machines::{MACHINE_DIR_NAME, Marker, machine_marker, read_marker};
+use crate::daemon::machines::{
+    MACHINE_DIR_NAME, Marker, is_stopped_record, machine_marker, read_marker,
+};
 use crate::machine::TOKEN_LEN;
 use crate::{Error, Result};
 
@@ -75,16 +77,20 @@ pub(super) struct State {
 }
 
 impl State {
-    /// Loads readable markers and binds the persisted port, or chooses and persists a new one.
+    /// Loads the tokens of the records that are `on`, and binds the persisted port, or chooses
+    /// and persists a new one.
     ///
-    /// `state::prepare_in` has already laid out `machines/` and `egress/`. An unreadable or
-    /// malformed marker contributes no token, but still prevents moving away from a port its
-    /// machine may use. A missing or malformed port file counts as absent.
+    /// `state::prepare_in` has already laid out `machines/` and `egress/`. A stopped record
+    /// contributes neither a token nor a hold on the port: its token was retired at the stop,
+    /// and its machine uses no port until it boots again. An empty, unreadable or malformed
+    /// marker contributes no token, but still prevents moving away from a port its machine may
+    /// use. A missing or malformed port file counts as absent.
     ///
     /// # Errors
     ///
-    /// Returns `EgressListen` when the persisted port cannot be bound while any marker remains,
-    /// when an ephemeral port cannot be bound, or when the listener cannot report its port.
+    /// Returns `EgressListen` when the persisted port cannot be bound while a record that is not
+    /// stopped remains, when an ephemeral port cannot be bound, or when the listener cannot
+    /// report its port.
     /// Returns `Io` when the port file or the markers directory cannot be read, or the port
     /// cannot be written.
     pub(super) fn bind(state_dir: &Path) -> Result<Self> {
@@ -100,7 +106,7 @@ impl State {
         let dir = state_dir.join(MACHINE_DIR_NAME);
         let markers = fs::read_dir(&dir).map_err(|error| Error::io(&dir, error))?;
         let mut entries = HashMap::new();
-        let mut has_markers = false;
+        let mut keeps_port = false;
         for entry in markers {
             let entry = entry.map_err(|error| Error::io(&dir, error))?;
             let Ok(name) = entry.file_name().into_string() else {
@@ -109,7 +115,10 @@ impl State {
             let Ok(path) = machine_marker(&dir, &name) else {
                 continue;
             };
-            has_markers = true;
+            if is_stopped_record(&path) {
+                continue;
+            }
+            keeps_port = true;
             if let Ok(Some(marker)) = read_marker(&path) {
                 entries.insert(
                     name,
@@ -124,7 +133,7 @@ impl State {
         let port = saved_port.unwrap_or(0);
         let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             Ok(listener) => listener,
-            Err(_) if port != 0 && !has_markers => TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            Err(_) if port != 0 && !keeps_port => TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
                 .map_err(|source| Error::EgressListen { port: 0, source })?,
             Err(source) => return Err(Error::EgressListen { port, source }),
         };
@@ -249,15 +258,43 @@ fn unhex(text: &str, out: &mut [u8]) -> Option<()> {
 mod tests {
     use super::*;
     use crate::config::Pattern;
-    use crate::daemon::machines::MarkerEgress;
+    use crate::daemon::machines::{MarkerEgress, Power};
     use crate::machine;
     use std::os::unix::fs::MetadataExt;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    /// A marker as `tests/machines.rs` writes one by hand: the token `a` 64 times in `[egress]`,
-    /// above a spec with no `[spec.egress]`, its image pinned.
-    const MARKER: &str = r#"[egress]
+    /// A marker as `tests/machines.rs` writes one by hand: `power = "on"`, then the token `a` 64
+    /// times in `[egress]`, above a spec with no `[spec.egress]`, its image pinned.
+    const MARKER: &str = r#"power = "on"
+
+[egress]
+token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[spec.image]
+name = "ghcr.io/org/name:latest"
+digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[spec.resources]
+cpus = 1
+"#;
+
+    /// A stopped machine's marker: `MARKER`'s token and spec, below `power = "off"`.
+    const STOPPED_MARKER: &str = r#"power = "off"
+
+[egress]
+token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[spec.image]
+name = "ghcr.io/org/name:latest"
+digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[spec.resources]
+cpus = 1
+"#;
+
+    /// A marker as v0.2.1 wrote it: a token and a spec, with no `power` above them.
+    const MARKER_WITHOUT_POWER: &str = r#"[egress]
 token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 [spec.image]
@@ -349,21 +386,26 @@ cpus = 1
     }
 
     #[test]
-    fn bind_refuses_a_held_port_while_a_marker_remains() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = laid_out(&tmp);
-        let (_held, port) = held_port();
-        port_file(&dir, format!("{port}\n"));
-        marker(&dir, "alpha", MARKER);
+    fn bind_refuses_a_held_port_while_a_record_is_not_off() {
+        // A running machine's marker, one as v0.2.1 wrote it, without `power`, one that does not
+        // parse, and an empty one: none of them says that its machine is off.
+        for text in [MARKER, MARKER_WITHOUT_POWER, "not a marker\n", ""] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = laid_out(&tmp);
+            let (_held, port) = held_port();
+            port_file(&dir, format!("{port}\n"));
+            marker(&dir, "alpha", text);
 
-        let Err(error) = State::bind(&dir) else {
-            panic!("bind took a port another socket holds");
-        };
+            let Err(error) = State::bind(&dir) else {
+                panic!("bind took a port another socket holds, beside {text:?}");
+            };
 
-        assert_eq!(
-            error.to_string(),
-            format!("failed to listen for egress decisions on 127.0.0.1:{port}")
-        );
+            assert_eq!(
+                error.to_string(),
+                format!("failed to listen for egress decisions on 127.0.0.1:{port}"),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
@@ -372,6 +414,23 @@ cpus = 1
         let dir = laid_out(&tmp);
         let (_held, port) = held_port();
         port_file(&dir, format!("{port}\n"));
+
+        let state = State::bind(&dir).unwrap();
+
+        assert_ne!(state.port(), port);
+        assert_eq!(
+            fs::read_to_string(dir.join("egress").join("port")).unwrap(),
+            format!("{}\n", state.port())
+        );
+    }
+
+    #[test]
+    fn bind_moves_off_a_held_port_when_every_record_is_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = laid_out(&tmp);
+        let (_held, port) = held_port();
+        port_file(&dir, format!("{port}\n"));
+        marker(&dir, "alpha", STOPPED_MARKER);
 
         let state = State::bind(&dir).unwrap();
 
@@ -402,7 +461,7 @@ cpus = 1
     }
 
     #[test]
-    fn bind_loads_the_token_of_every_marker() {
+    fn bind_loads_the_token_of_every_marker_that_is_on() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = laid_out(&tmp);
         marker(&dir, "alpha", MARKER);
@@ -423,6 +482,18 @@ cpus = 1
             Some(("beta".to_string(), Egress::default()))
         );
         assert_eq!(state.lookup(&Token([0xcc; 32])), None);
+    }
+
+    #[test]
+    fn bind_loads_no_token_from_an_off_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = laid_out(&tmp);
+        marker(&dir, "alpha", STOPPED_MARKER);
+
+        let state = State::bind(&dir).unwrap();
+
+        // The record keeps its last boot's token, which the decider retired at the stop.
+        assert_eq!(state.lookup(&Token([0xaa; 32])), None);
     }
 
     #[test]
@@ -533,6 +604,7 @@ cpus = 1
     /// whose `allow` holds `allow`.
     fn minted(token: u8, allow: &[&str]) -> Marker {
         Marker {
+            power: Power::On,
             egress: MarkerEgress {
                 token: Token([token; 32]),
             },
