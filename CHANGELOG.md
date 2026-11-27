@@ -1,10 +1,10 @@
 # Moon MCHN Changelog
 
-## unreleased
+## v0.3.0 - 2026-11-25
 
 ### Features
 
-- **BREAKING** Mounts are live views of the host; removed `staged` from config
+- **BREAKING** Mounts are live views of the host; removed `staged` from config [#9](https://github.com/galaxyloop-labs/moonmchn/pull/9) (@jodosha)
 
   Mounts no longer take `staged`: every host mount is a live view of its directory.
 
@@ -15,6 +15,10 @@
      (`$MOONMCHN_HOME/config.toml`, else `$XDG_CONFIG_HOME/moonmchn/config.toml`,
      else `~/.config/moonmchn/config.toml`).
   4. Start the daemon: `mchn daemon start`.
+
+### Bug Fixes
+
+- **deps**: Bump url to 2.5.9 for RUSTSEC-2026-0592 (@jodosha)
 
 ## v0.2.1 - 2026-11-18
 
