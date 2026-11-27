@@ -28,6 +28,11 @@ static EXECS: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(Vec::new());
 /// run in parallel, so a test that reads it uses a machine name no other test uses.
 static BINDINGS: Mutex<Vec<(String, EgressEndpoint)>> = Mutex::new(Vec::new());
 
+/// Every call to `start`, `update`, `power_on`, `stop` and `delete`, with the machine's name,
+/// across the tests of one binary: each of the five methods writes its own first thing. They
+/// run in parallel, so a test that reads it uses a machine name no other test uses.
+static CALLS: Mutex<Vec<(String, &'static str)>> = Mutex::new(Vec::new());
+
 pub struct FakeEngine;
 
 impl Engine for FakeEngine {
@@ -122,6 +127,19 @@ pub fn bindings(name: &str) -> Vec<EgressEndpoint> {
         .collect()
 }
 
+/// Returns the calls made on the machine `name`, in order, each one of `"start"`, `"update"`,
+/// `"power_on"`, `"stop"` and `"delete"`. They are collected, so the lock is free again before a
+/// caller's assertion can fail.
+pub fn calls(name: &str) -> Vec<&'static str> {
+    CALLS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(machine, _)| machine == name)
+        .map(|(_, call)| *call)
+        .collect()
+}
+
 pub struct FakeMachine {
     name: String,
 }
@@ -134,6 +152,8 @@ impl Machine for FakeMachine {
             .lock()
             .unwrap()
             .push((name.to_string(), egress.clone()));
+
+        CALLS.lock().unwrap().push((name.to_string(), "start"));
 
         match name {
             "hung" => hang(),
@@ -149,6 +169,15 @@ impl Machine for FakeMachine {
             }
             _ => Self::attach(name),
         }
+    }
+
+    fn update(&self, _from: &Spec, _to: &Spec) -> Result<()> {
+        Ok(())
+    }
+
+    fn power_on(&self, _egress: &EgressEndpoint) -> Result<()> {
+        CALLS.lock().unwrap().push((self.name.clone(), "power_on"));
+        Ok(())
     }
 
     fn attach(name: &str) -> Result<Self> {
@@ -192,7 +221,13 @@ impl Machine for FakeMachine {
         }
     }
 
-    fn stop(self) -> Result<()> {
+    fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn delete(self) -> Result<()> {
+        CALLS.lock().unwrap().push((self.name.clone(), "delete"));
+
         match self.name.as_str() {
             "hung" => hang(),
             "stubborn" => Err(engine("stubborn")),

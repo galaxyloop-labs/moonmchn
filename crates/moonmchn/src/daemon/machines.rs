@@ -48,8 +48,8 @@
 //! - `boot`, rolling back the marker `start` just wrote, when the boot failed and the engine
 //!   left no machine behind (any boot error except `MachineLeftover`).
 //! - `start_existing`, replacing a machine the engine reports `Failed`, once `destroy` saw the
-//!   engine stop it or report `MachineNotFound`.
-//! - `stop`, through `destroy`, once the engine stopped the machine or reported
+//!   engine delete it or report `MachineNotFound`.
+//! - `stop`, through `destroy`, once the engine deleted the machine or reported
 //!   `MachineNotFound`.
 //! - `stop_all`, at the daemon's teardown, on the same two outcomes as `stop`. A machine still
 //!   in flight gets no stop and keeps its marker, and so does a machine whose stop has not
@@ -377,7 +377,7 @@ impl Machines {
 
     /// Stops a machine and removes its marker, or reports it not running.
     ///
-    /// - `Stopped`: the engine stopped the machine, and its marker is removed.
+    /// - `Stopped`: the engine deleted the machine, and its marker is removed.
     /// - `NotRunning`: Moon MCHN owns no machine under this name. Either there is no marker, or
     ///   the engine reported the machine already gone (`MachineNotFound`) and the stale marker
     ///   is removed.
@@ -537,7 +537,7 @@ impl Machines {
     ///
     /// Returns each name with its outcome, in no particular order:
     ///
-    /// - `Ok(())`: the engine stopped the machine, or reported it gone (`MachineNotFound`), and
+    /// - `Ok(())`: the engine deleted the machine, or reported it gone (`MachineNotFound`), and
     ///   its marker is removed.
     /// - `Err(MachineBusy)` with the claim's state: an operation still runs on the machine, so
     ///   no stop started, and the marker stays for that operation or for the next daemon.
@@ -814,7 +814,7 @@ fn start_existing<E: Engine>(
         // failed mint keeps the dead machine and its marker as they are. Then delete it, write
         // the new marker, and boot fresh. From the new marker on, the boot's rollback may
         // remove it.
-        State::Failed => {
+        State::Failed | State::Stopped => {
             let spec = pin::<E>(spec)?;
             let token = egress::Token::mint()?;
             let minted = Marker {
@@ -870,9 +870,9 @@ fn reuse<M: Machine>(
     Ok(MachineStart::AlreadyRunning(status))
 }
 
-/// Stops `machine`, removes its marker, and retires its token. Returns `true` when the engine
-/// stopped it, and `false` when the engine reported `MachineNotFound`: the one confirmation
-/// that a machine is gone, which makes the marker stale.
+/// Deletes `machine` with its disk, removes its marker, and retires its token. Returns `true`
+/// when the engine deleted it, and `false` when the engine reported `MachineNotFound`: the one
+/// confirmation that a machine is gone, which makes the marker stale.
 ///
 /// Any other error returns before the marker is touched: the machine may still exist, and the
 /// marker is how a later `stop` finds it.
@@ -882,14 +882,14 @@ fn destroy<M: Machine>(
     egress: &egress::State,
     name: &str,
 ) -> Result<bool> {
-    let stopped = match machine.stop() {
+    let deleted = match machine.delete() {
         Ok(()) => true,
         Err(Error::MachineNotFound { .. }) => false,
         Err(e) => return Err(e),
     };
     remove_marker(marker)?;
     egress.retire(name);
-    Ok(stopped)
+    Ok(deleted)
 }
 
 /// A row for a machine with no process to report: one in flight, whose claim says what is
@@ -996,7 +996,7 @@ pub(super) fn is_stopped_record(path: &Path) -> bool {
 /// A missing file counts as removed (idempotency).
 ///
 /// `start` calls it to roll back a failed boot and to replace a failed machine; `stop` calls it
-/// once the engine has stopped the machine or reported it gone.
+/// once the engine has deleted the machine or reported it gone.
 fn remove_marker(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),

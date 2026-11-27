@@ -216,18 +216,30 @@ names a machine SDK:
   gateway's (`type Gateway: Gateway`), and resolves images: `image_digest(image)`
   returns the digest of the content an image names, which the machine about to boot
   then runs pinned.
-- `Machine` carries the behavior: `start(name, spec, egress)` creates and boots a
-  machine from its `Spec`, what `mchn start` asked for, its image pinned to
-  that digest, with its network routed through the daemon's egress decider: `egress`,
-  an `EgressEndpoint`, holds the decider's loopback address and the machine's token,
-  64 hex digits its gateway presents with every flow; `attach(name)` reopens a handle
-  by name; `status()` reports a `Status` (name, `State`, optional pid); `resume()`
-  resumes a paused machine's saved execution; `exec(command, timeout)` runs a command
-  in the guest as the sessions' user, uid 1000, with no input and its output
-  discarded, and returns its exit status, giving up once `timeout` passes; the host
-  keeps none of that output, and its memory for the call stays within a fixed bound,
-  however much the guest writes; and
-  `stop(self)` destroys the machine with its disks.
+- `Machine` carries the behavior:
+  - `start(name, spec, egress)` creates and boots a new machine from its `Spec`, what
+    `mchn start` asked for, its image pinned to that digest, with its network routed
+    through the daemon's egress decider: `egress`, an `EgressEndpoint`, holds the
+    decider's loopback address and the machine's token, 64 hex digits its gateway
+    presents with every flow. A failed boot deletes the machine again; when that
+    delete fails too, the error is `MachineLeftover`.
+  - `update(from, to)` moves a stopped machine from the settings it last ran with,
+    `from`, to those of `to`: its mounts and resources, all or nothing. `from` names
+    the mounts to take away, for an engine that cannot list them.
+  - `power_on(egress)` powers on a machine that exists and is stopped, with its disk;
+    `egress` carries the token minted for this boot. It creates nothing, and a failed
+    boot deletes nothing: the VM may be left alive, and the caller stops it.
+  - `stop()` powers the machine off and keeps its disk, for a later `power_on`; a
+    machine already stopped answers `Ok`, and any error but `MachineNotFound` means it
+    may still run. `delete(self)` removes the machine with its disk; any error but
+    `MachineNotFound` means it may still exist. `MachineNotFound`, from either, is the
+    one confirmation that the engine has no such machine.
+  - `attach(name)` reopens a handle by name; `status()` reports a `Status` (name,
+    `State`, optional pid); `resume()` resumes a paused machine's saved execution.
+  - `exec(command, timeout)` runs a command in the guest as the sessions' user, uid
+    1000, with no input and its output discarded, and returns its exit status, giving
+    up once `timeout` passes; the host keeps none of that output, and its memory for
+    the call stays within a fixed bound, however much the guest writes.
 - `Gateway` decodes the request the engine's gateway writes to the decider before
   each flow: `decode_flow(bytes)` answers `Decoded::Partial(len)` while the request
   needs more bytes, `Decoded::Complete(flow)` with the `Flow`'s token, destination and
@@ -261,11 +273,14 @@ impl Engine for MyEngine {
 
 impl Machine for MyMachine {
     fn start(name: &str, spec: Spec, egress: &EgressEndpoint) -> moonmchn::Result<Self> { todo!() }
+    fn update(&self, from: &Spec, to: &Spec) -> moonmchn::Result<()> { todo!() }
+    fn power_on(&self, egress: &EgressEndpoint) -> moonmchn::Result<()> { todo!() }
     fn attach(name: &str) -> moonmchn::Result<Self> { todo!() }
     fn status(&self) -> moonmchn::Result<Status> { todo!() }
     fn resume(&self) -> moonmchn::Result<()> { todo!() }
     fn exec(&self, command: &[String], timeout: Duration) -> moonmchn::Result<i32> { todo!() }
-    fn stop(self) -> moonmchn::Result<()> { todo!() }
+    fn stop(&self) -> moonmchn::Result<()> { todo!() }
+    fn delete(self) -> moonmchn::Result<()> { todo!() }
 }
 
 impl Gateway for MyGateway {
@@ -311,6 +326,22 @@ which the CLI runs in place of itself. The adapter also exposes
 `egress_endpoint(endpoint)` in place of the previous SDK `From`
 implementations. These are functions because both configuration and SDK types
 are foreign to the adapter crate under Rust's orphan rules.
+
+For a machine that exists, `update` reads the sizes of its disks from
+`smolvm machine status --name <name> --json`, where `null` stands for the engine's
+default, 20 GiB of storage and 10 GiB of overlay. Then one `smolvm machine update`
+call removes every mount of `from`, adds every mount of `to`, sets `to`'s CPUs and
+memory, turns the GPU on or off when that setting changed, and grows a disk only when
+`to` asks for more than the engine holds, since the engine refuses to shrink one. A
+CPU count or memory that `from` set and `to` leaves unset goes back to the engine's
+default, 4 CPUs and 8192 MiB, as a new machine gets it: the engine keeps any value the
+call leaves out.
+
+`power_on` asks the engine for the machine's data directory,
+`smolvm machine data-dir --name <name>`, and refuses the machine when `storage.raw`
+or `overlay.raw` is missing there: the engine would make new disks and boot it empty.
+Otherwise it runs the same mediated `smolvm machine start` as `start`, with no cleanup
+when the boot fails. `stop` and `delete` go through the SDK.
 
 Conversion remains infallible data mapping, not validation or machine creation.
 Rust field names, TOML keys, unset/default behavior, and CLI behavior are unchanged

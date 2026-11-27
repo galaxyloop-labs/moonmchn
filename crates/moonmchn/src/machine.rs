@@ -62,10 +62,33 @@ pub trait Machine: Sized {
     /// `MachineLeftover`, because the engine still holds a machine under `name`.
     fn start(name: &str, spec: Spec, egress: &EgressEndpoint) -> Result<Self>;
 
+    /// Moves a stopped machine from the settings it last ran with, `from`, to `to`'s: its
+    /// mounts and resources. All or nothing: on an error the machine still holds `from`'s
+    /// settings.
+    ///
+    /// `from` names the mounts to take away, for an engine that cannot list the ones a machine
+    /// holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine refuses the change or cannot be asked.
+    fn update(&self, from: &Spec, to: &Spec) -> Result<()>;
+
+    /// Powers on a machine that exists and is stopped, with its disk, and returns once the
+    /// guest accepts work. Unlike [`start`](Machine::start), it creates nothing. `egress` is
+    /// where the machine's gateway reaches the decider it asks about every flow, with the token
+    /// minted for this boot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine fails to boot the machine. Nothing is deleted then, and
+    /// the VM may be left alive: the caller stops it.
+    fn power_on(&self, egress: &EgressEndpoint) -> Result<()>;
+
     /// Reopens a handle to the machine `name`.
     ///
     /// A handle may open for a machine the engine no longer has; only
-    /// [`stop`](Machine::stop) confirms an absence.
+    /// [`stop`](Machine::stop) and [`delete`](Machine::delete) confirm an absence.
     ///
     /// # Errors
     ///
@@ -100,14 +123,23 @@ pub trait Machine: Sized {
     /// before the command ended; the command is then killed.
     fn exec(&self, command: &[String], timeout: Duration) -> Result<i32>;
 
-    /// Stops the machine and discards its disks.
+    /// Powers the machine off and keeps its disk, for a later [`power_on`](Machine::power_on).
+    /// A machine already stopped answers `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MachineNotFound` if the engine has no such machine. Any other error means the
+    /// machine may still run.
+    fn stop(&self) -> Result<()>;
+
+    /// Stops the machine and removes it with its disk.
     ///
     /// # Errors
     ///
     /// Returns `MachineNotFound` if the engine has no such machine: the one
     /// confirmation that a machine is gone. Any other error means the machine may
     /// still exist.
-    fn stop(self) -> Result<()>;
+    fn delete(self) -> Result<()>;
 }
 
 /// How an engine's gateway asks the daemon's decider about each flow a guest opens: the request
@@ -291,6 +323,8 @@ pub enum State {
     /// The engine is saving, or holds, the machine's execution for a later resume. `start`
     /// resumes it when the spec matches and refuses a different one; `stop` discards it.
     Paused,
+    /// The machine is powered off with its disk kept: `mchn start` boots it again.
+    Stopped,
     /// The engine reports the machine dead: stopped, errored or deleted. Starting it
     /// again boots it fresh.
     Failed,
@@ -306,6 +340,7 @@ impl fmt::Display for State {
             State::Running => "running",
             State::Stopping => "stopping",
             State::Paused => "paused",
+            State::Stopped => "stopped",
             State::Failed => "failed",
             State::Unknown => "unknown",
         };
@@ -326,6 +361,7 @@ mod tests {
             (State::Running, "running"),
             (State::Stopping, "stopping"),
             (State::Paused, "paused"),
+            (State::Stopped, "stopped"),
             (State::Failed, "failed"),
             (State::Unknown, "unknown"),
         ];

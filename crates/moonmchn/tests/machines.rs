@@ -693,7 +693,7 @@ fn a_failed_stop_keeps_the_record() {
 #[test]
 fn stopping_a_machine_the_engine_lost_cleans_up() {
     let (dir, client) = daemon();
-    // The fake's engine has lost `ghost`: its `stop` fails with `MachineNotFound`.
+    // The fake's engine has lost `ghost`: its `delete` fails with `MachineNotFound`.
     write_marker(dir.path(), "ghost");
 
     let stopped = client.machine_stop("ghost").unwrap();
@@ -711,6 +711,18 @@ fn stop_announces_before_destroying() {
 
     assert_eq!(stopped, MachineStop::Stopped);
     common::assert_announced("announced", "mchn machine stop announced");
+}
+
+#[test]
+fn stop_asks_the_engine_to_delete() {
+    let (_dir, client) = daemon();
+    client.machine_start("gone", spec()).unwrap();
+
+    client.machine_stop("gone").unwrap();
+
+    // A `destroy` that called the trait's `stop` would compile too, and keep the engine's
+    // machine while its record goes.
+    assert_eq!(common::calls("gone"), ["start", "delete"]);
 }
 
 #[test]
