@@ -173,6 +173,14 @@ impl machine::Engine for Engine {
 /// Moon MCHN machine implementation for smolmachines.
 pub struct Machine(SdkMachine);
 
+impl Machine {
+    /// Returns the underlying smolmachines machine.
+    #[must_use]
+    fn sdk(&self) -> &SdkMachine {
+        &self.0
+    }
+}
+
 impl machine::Machine for Machine {
     fn start(name: &str, spec: machine::Spec, egress: &EgressEndpoint) -> Result<Self> {
         let machine =
@@ -186,7 +194,7 @@ impl machine::Machine for Machine {
 
     fn update(&self, from: &machine::Spec, to: &machine::Spec) -> Result<()> {
         let engine_cli = smolmachines::engine_cli().map_err(|error| engine_error(&error))?;
-        let name = self.0.name();
+        let name = self.sdk().name();
         let status = run_engine(
             &engine_cli,
             &[
@@ -204,8 +212,11 @@ impl machine::Machine for Machine {
     }
 
     fn power_on(&self, egress: &EgressEndpoint) -> Result<()> {
-        let name = self.0.name();
-        let data_dir = self.0.data_dir().map_err(|error| engine_error(&error))?;
+        let name = self.sdk().name();
+        let data_dir = self
+            .sdk()
+            .data_dir()
+            .map_err(|error| engine_error(&error))?;
         if !has_disks(&data_dir) {
             return Err(Error::Engine {
                 message: format!(
@@ -226,9 +237,9 @@ impl machine::Machine for Machine {
     }
 
     fn status(&self) -> Result<Status> {
-        let name = self.0.name().to_string();
-        let state = state(self.0.state());
-        let pid = pid_of(state, self.0.pid());
+        let name = self.sdk().name().to_string();
+        let state = state(self.sdk().state());
+        let pid = pid_of(state, self.sdk().pid());
 
         Ok(Status { name, state, pid })
     }
@@ -237,7 +248,7 @@ impl machine::Machine for Machine {
         // `machine resume` takes no interceptor, so the engine refuses to resume a machine
         // `start` booted: "mediated egress: this machine requires an external interceptor on
         // every start". The daemon passes that error on.
-        self.0.resume().map_err(|error| engine_error(&error))
+        self.sdk().resume().map_err(|error| engine_error(&error))
     }
 
     fn exec(&self, command: &[String], timeout: Duration) -> Result<i32> {
@@ -245,21 +256,21 @@ impl machine::Machine for Machine {
 
         exec_discarding_output(
             &engine_cli,
-            &exec_args(self.0.name(), command, timeout),
+            &exec_args(self.sdk().name(), command, timeout),
             timeout,
         )
     }
 
     fn stop(&self) -> Result<()> {
-        self.0
+        self.sdk()
             .stop()
-            .map_err(|error| absence_or_engine_error(self.0.name(), &error))
+            .map_err(|error| absence_or_engine_error(self.sdk().name(), &error))
     }
 
     fn delete(self) -> Result<()> {
-        self.0
+        self.sdk()
             .delete()
-            .map_err(|error| absence_or_engine_error(self.0.name(), &error))
+            .map_err(|error| absence_or_engine_error(self.sdk().name(), &error))
     }
 }
 
